@@ -66,11 +66,17 @@ public class OpenCodeManager {
             String serverPath = getServerPath();
             log.info("启动 OpenCode Server: {}", serverPath);
 
+            String projectRoot = properties.getProjectRoot();
+            if (projectRoot == null || projectRoot.isEmpty()) {
+                projectRoot = System.getProperty("user.dir");
+            }
+            log.info("OpenCode 工作目录: {}", projectRoot);
+
             ProcessBuilder pb = new ProcessBuilder(
-                    serverPath, "serve", "--port", String.valueOf(properties.getPort())
+                    serverPath, "serve", "--port", String.valueOf(properties.getPort()), projectRoot
             );
             pb.redirectErrorStream(true);
-            pb.directory(new File(System.getProperty("user.dir")));
+            pb.directory(new File(projectRoot));
 
             openCodeProcess = pb.start();
 
@@ -125,10 +131,25 @@ public class OpenCodeManager {
      * 配置自建的 test-gen-agent，使用外部 prompt 文件
      */
     private void generateConfigFile() throws IOException {
-        Path configPath = Paths.get(System.getProperty("user.dir"), ".opencode.json");
+        String projectRoot = properties.getProjectRoot();
+        if (projectRoot == null || projectRoot.isEmpty()) {
+            projectRoot = System.getProperty("user.dir");
+        }
+        
+        // Windows 路径需要双反斜杠，JSON 才会正确解析
+        String escapedProjectRoot = projectRoot.replace("\\", "\\\\");
+        
+        // 使用 opencode.json 而不是 .opencode.json（项目级配置）
+        Path configPath = Paths.get(projectRoot, "opencode.json");
+        
+        // 如果配置文件已存在，先删除再重新生成
+        if (Files.exists(configPath)) {
+            Files.delete(configPath);
+            log.info("已删除旧的 OpenCode 配置文件: {}", configPath);
+        }
         
         // 确保 Agent 配置文件存在
-        Path agentConfigPath = Paths.get(System.getProperty("user.dir"), ".opencode", "agents", "test-gen-agent.md");
+        Path agentConfigPath = Paths.get(projectRoot, ".opencode", "agents", "test-gen-agent.md");
         if (!Files.exists(agentConfigPath)) {
             log.warn("Agent 配置文件不存在: {}，将使用内联配置", agentConfigPath);
         }
@@ -136,6 +157,7 @@ public class OpenCodeManager {
         String configContent = String.format("""
                 {
                   "$schema": "https://opencode.ai/config.json",
+                  "projectRoot": "%s",
                   "model": "custom/%s",
                   "providers": {
                     "custom": {
@@ -163,6 +185,7 @@ public class OpenCodeManager {
                   }
                 }
                 """,
+                escapedProjectRoot,
                 llmProperties.getModel(),
                 llmProperties.getApiKey() != null ? llmProperties.getApiKey() : "",
                 llmProperties.getApiUrl(),

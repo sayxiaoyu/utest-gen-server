@@ -33,6 +33,11 @@ public class OpenCodeProperties {
     private String binaryDir = "opencode";
 
     /**
+     * 项目根目录（OpenCode LSP 需要知道项目路径）
+     */
+    private String projectRoot;
+
+    /**
      * 请求超时时间（毫秒）
      */
     private int requestTimeout = 120000;

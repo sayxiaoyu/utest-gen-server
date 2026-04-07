@@ -1,5 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "projectRoot": "D:\\JAVA\\ai\\utest-gen-server",
   "model": "custom/gpt-5.4",
   "providers": {
     "custom": {

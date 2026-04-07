@@ -12,6 +12,9 @@ opencode:
   startup-timeout: 30
   binary-dir: opencode
   request-timeout: 120000
+  # 项目根目录（不配置则默认使用启动时的工作目录，即 System.getProperty("user.dir")）
+  # 如果需要固定项目，取消下面注释并修改为具体路径
+  # project-root: /path/to/your/project
   # 生成相关配置
   generation:
     timeout: 120000        # 生成超时时间
