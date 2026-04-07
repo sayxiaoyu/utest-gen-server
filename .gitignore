@@ -1,0 +1,17 @@
+# Maven
+target/
+
+# IDE
+.idea/
+.classpath
+.project
+.settings/
+.factorypath
+*.iml
+
+# OpenCode binaries (downloaded separately)
+opencode/
+src/main/resources/opencode/
+
+# Logs
+*.log

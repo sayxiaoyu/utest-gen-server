@@ -1,0 +1,56 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: utest-gen-server
+
+# OpenCode 配置
+opencode:
+  enabled: true
+  port: 3000
+  startup-timeout: 30
+  binary-dir: opencode
+  request-timeout: 120000
+  # 生成相关配置
+  generation:
+    timeout: 120000        # 生成超时时间
+    max-tokens: 4096       # 最大 token 数
+    temperature: 0.7       # 温度参数
+  # 修复相关配置
+  fix:
+    max-rounds: 2          # 最大修复次数
+    compile-timeout: 30000 # 编译超时
+    test-timeout: 60000    # 测试运行超时
+
+# LLM 配置（供 OpenCode 本地使用）
+llm:
+  api-url: https://openai.good.hidns.vip/v1
+  api-key: https://github.com/smanx/free-api
+  model: gpt-5.4
+  max-tokens: 4096
+  temperature: 0.7
+
+# 远程后端服务配置
+backend:
+  api-url: http://localhost:8080
+  api-key:
+  timeout: 60000
+  sync-enabled: true
+
+# 提示词模板配置
+prompt:
+  template:
+    external-enabled: false
+    template-path: classpath:templates/prompts/
+    class-level-template: class-level-prompt.txt
+    fix-template: fix-prompt.txt
+    hot-reload: true
+    cache-millis: -1
+
+# 日志配置
+logging:
+  level:
+    root: INFO
+    com.utest.gen: DEBUG
+    org.springframework.web: INFO
