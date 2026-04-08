@@ -1,7 +1,9 @@
 package com.utest.gen.service;
 
 import com.utest.gen.config.BackendProperties;
-import com.utest.gen.model.TestGenResponse;
+import com.utest.gen.model.*;
+import lombok.Builder;
+import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.*;
@@ -10,8 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.Instant;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.List;
 
 /**
  * 结果同步服务
@@ -30,13 +31,13 @@ public class ResultSyncService {
     /**
      * 异步同步生成结果到远程后端
      *
-     * @param requestId  请求ID
-     * @param className  类名
+     * @param requestId   请求ID
+     * @param className   类名
      * @param methodNames 方法名列表
-     * @param response   生成结果
+     * @param response    生成结果
      */
     @Async
-    public void syncResult(String requestId, String className, java.util.List<String> methodNames, TestGenResponse response) {
+    public void syncResult(String requestId, String className, List<String> methodNames, TestGenResponse response) {
         if (!backendProperties.isSyncEnabled()) {
             log.debug("结果同步已禁用，跳过同步");
             return;
@@ -48,67 +49,25 @@ public class ResultSyncService {
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
-            if (backendProperties.getApiKey() != null && !backendProperties.getApiKey().isEmpty()) {
-                headers.setBearerAuth(backendProperties.getApiKey());
-            }
 
-            // 构建同步请求体
-            Map<String, Object> request = new HashMap<>();
-            request.put("requestId", requestId);
-            request.put("className", className);
-            request.put("methodNames", methodNames);
-            request.put("timestamp", Instant.now().toString());
+            // 构建同步请求对象
+            SyncRequest request = buildSyncRequest(requestId, className, methodNames, response);
 
-            // 结果信息
-            Map<String, Object> result = new HashMap<>();
-            result.put("success", response.isSuccess());
-            result.put("testFilePath", response.getTestFilePath());
-            result.put("testClassName", response.getTestClassName());
-            result.put("testCode", response.getTestCode());
-            result.put("scenarios", response.getTestScenarios());
-            result.put("fixRounds", response.getFixRounds());
-            result.put("fixHistory", response.getFixHistory());
+            HttpEntity<SyncRequest> entity = new HttpEntity<>(request, headers);
 
-            // 编译结果
-            if (response.getCompileResult() != null) {
-                Map<String, Object> compileResult = new HashMap<>();
-                compileResult.put("success", response.getCompileResult().isSuccess());
-                compileResult.put("errorMessage", response.getCompileResult().getErrorMessage());
-                result.put("compileResult", compileResult);
-            }
-
-            // 测试结果
-            if (response.getTestResult() != null) {
-                Map<String, Object> testResult = new HashMap<>();
-                testResult.put("success", response.getTestResult().isSuccess());
-                testResult.put("passed", response.getTestResult().getPassed());
-                testResult.put("failed", response.getTestResult().getFailed());
-                testResult.put("output", response.getTestResult().getOutput());
-                result.put("testResult", testResult);
-            }
-
-            // 错误信息
-            if (response.getErrorMessage() != null) {
-                result.put("errorMessage", response.getErrorMessage());
-            }
-
-            request.put("result", result);
-
-            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(request, headers);
-
-            ResponseEntity<Map> syncResponse = restTemplate.exchange(
+            ResponseEntity<SyncResponse> syncResponse = restTemplate.exchange(
                     apiUrl + "/api/test/sync-result",
                     HttpMethod.POST,
                     entity,
-                    Map.class
+                    SyncResponse.class
             );
 
             if (syncResponse.getStatusCode() == HttpStatus.OK && syncResponse.getBody() != null) {
-                Map<String, Object> body = syncResponse.getBody();
-                if (Boolean.TRUE.equals(body.get("success"))) {
+                SyncResponse body = syncResponse.getBody();
+                if (body.isSuccess()) {
                     log.info("结果同步成功: requestId={}", requestId);
                 } else {
-                    log.warn("结果同步失败: requestId={}, message={}", requestId, body.get("message"));
+                    log.warn("结果同步失败: requestId={}, message={}", requestId, body.getMessage());
                 }
             } else {
                 log.warn("结果同步返回异常: requestId={}, status={}", requestId, syncResponse.getStatusCode());
@@ -121,10 +80,87 @@ public class ResultSyncService {
     }
 
     /**
+     * 构建同步请求对象
+     */
+    private SyncRequest buildSyncRequest(String requestId, String className,
+                                         List<String> methodNames, TestGenResponse response) {
+        return SyncRequest.builder()
+                .requestId(requestId)
+                .className(className)
+                .methodNames(methodNames)
+                .timestamp(Instant.now().toString())
+                .result(buildResultDetail(response))
+                .build();
+    }
+
+    /**
+     * 构建结果详情
+     */
+    private ResultDetail buildResultDetail(TestGenResponse response) {
+        return ResultDetail.builder()
+                .success(response.isSuccess())
+                .testFilePath(response.getTestFilePath())
+                .testClassName(response.getTestClassName())
+                .testCode(response.getTestCode())
+                .scenarios(response.getTestScenarios())
+                .fixRounds(response.getFixRounds())
+                .fixHistory(response.getFixHistory())
+                .methodResults(response.getMethodResults())
+                .compileResult(response.getCompileResult())
+                .testResult(response.getTestResult())
+                .errorMessage(response.getErrorMessage())
+                .build();
+    }
+
+    /**
      * 同步单个方法生成结果（兼容旧接口）
      */
     @Async
     public void syncSingleResult(String requestId, String className, String methodName, TestGenResponse response) {
         syncResult(requestId, className, java.util.Collections.singletonList(methodName), response);
+    }
+
+    // ==================== DTO 类定义 ====================
+
+    /**
+     * 同步请求对象
+     */
+    @Data
+    @Builder
+    public static class SyncRequest {
+        private String requestId;
+        private String className;
+        private List<String> methodNames;
+        private String timestamp;
+        private ResultDetail result;
+    }
+
+    /**
+     * 同步响应对象
+     */
+    @Data
+    @Builder
+    public static class SyncResponse {
+        private boolean success;
+        private String message;
+    }
+
+    /**
+     * 结果详情
+     */
+    @Data
+    @Builder
+    public static class ResultDetail {
+        private boolean success;
+        private String testFilePath;
+        private String testClassName;
+        private String testCode;
+        private List<String> scenarios;
+        private int fixRounds;
+        private List<String> fixHistory;
+        private List<MethodTestResult> methodResults;
+        private CompileResult compileResult;
+        private TestResult testResult;
+        private String errorMessage;
     }
 }

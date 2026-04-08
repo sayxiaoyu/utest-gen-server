@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 测试生成响应
@@ -69,6 +70,11 @@ public class TestGenResponse {
     private List<String> fixHistory = new java.util.ArrayList<>();
 
     /**
+     * 方法级别的测试结果列表
+     */
+    private List<MethodTestResult> methodResults;
+
+    /**
      * 创建成功响应
      */
     public static TestGenResponse success(String testFilePath, String testClassName,
@@ -90,25 +96,5 @@ public class TestGenResponse {
                 .success(false)
                 .errorMessage(errorMessage)
                 .build();
-    }
-
-    @Data
-    @Builder
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class CompileResult {
-        private boolean success;
-        private String errorMessage;
-    }
-
-    @Data
-    @Builder
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class TestResult {
-        private boolean success;
-        private int passed;
-        private int failed;
-        private String output;
     }
 }
