@@ -1,7 +1,7 @@
 package com.utest.gen.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.utest.gen.model.TestGenResponse;
+import com.utest.gen.model.*;
 import com.utest.gen.opencode.OpenCodeManager;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -9,6 +9,8 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -16,7 +18,7 @@ import java.util.Map;
  * OpenCode 自动化测试生成服务
  * 通过调用自建的 test-gen-agent 一次性完成全流程：
  * 上下文提取 → LLM生成 → 编译验证 → 自动修复 → 运行测试
- * 
+ *
  * 后端只需传入：源文件路径 + 待测方法列表
  * Agent 自主完成所有步骤，后端只收集最终结果
  */
@@ -34,18 +36,19 @@ public class OpenCodeAutoGenService {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
-     * 自动化生成测试 - Agent 自主完成全流程
-     * 
-     * 后端只需传入待测方法信息，Agent 自主完成：
-     * 1. 上下文提取 (LSP)
-     * 2. LLM生成测试代码
-     * 3. 编译验证
-     * 4. 自动修复（最多2次）
-     * 5. 运行测试
-     * 
+     * 自动化生成测试 - Agent 自主完成全流程（支持增量更新）
+     *
+     * Agent 自主完成：
+     * 1. 检查测试类文件是否存在
+     * 2. 若存在，解析已有测试类，识别各方法的测试函数位置
+     * 3. 增量生成：新方法插入，已有方法覆盖更新
+     * 4. 编译验证
+     * 5. 自动修复（最多2次）
+     * 6. 运行测试
+     *
      * @param sourceFile  源文件路径（绝对路径）
      * @param methodNames 待测方法名列表
-     * @return 生成结果（包含测试代码、编译结果、测试结果）
+     * @return 生成结果（包含测试代码、编译结果、测试结果、方法级行号信息）
      */
     public TestGenResponse autoGenerate(String sourceFile, List<String> methodNames) {
         String requestId = generateRequestId();
@@ -55,13 +58,13 @@ public class OpenCodeAutoGenService {
         long startTime = System.currentTimeMillis();
 
         try {
-            // 构建极简的 Agent 请求 - 只传必要参数
-            Map<String, Object> context = Map.of(
-                    "sourceFile", sourceFile,
-                    "methodNames", methodNames
-            );
+            // 构建极简 Agent 请求上下文
+            // Agent 通过 Skill 自主推断测试类路径并判断是否存在
+            Map<String, Object> context = new HashMap<>();
+            context.put("sourceFile", sourceFile);
+            context.put("methodNames", methodNames);
 
-            // 调用 OpenCode Agent - test-gen-agent 自主完成全流程
+            // 调用 OpenCode Agent - test-gen-agent 自主完成全流程（含增量更新）
             Map<String, Object> agentResult = callOpenCodeAgent(context);
 
             // 解析并收集结果
@@ -132,7 +135,7 @@ public class OpenCodeAutoGenService {
     private TestGenResponse parseAgentResult(Map<String, Object> agentResult) {
         try {
             // Agent 返回的结果在 content 或 result 字段中
-            String content = (String) agentResult.getOrDefault("content", 
+            String content = (String) agentResult.getOrDefault("content",
                     agentResult.get("result"));
 
             if (content == null) {
@@ -145,13 +148,17 @@ public class OpenCodeAutoGenService {
             if (jsonStr == null) {
                 return TestGenResponse.builder()
                         .success(false)
-                        .errorMessage("Agent 返回格式异常: " + 
+                        .errorMessage("Agent 返回格式异常: " +
                                 content.substring(0, Math.min(200, content.length())))
                         .build();
             }
 
             // 解析JSON结果
             Map<String, Object> result = objectMapper.readValue(jsonStr, Map.class);
+
+            // 解析方法级别结果（用于增量更新）
+            List<MethodTestResult> methodResults = parseMethodResults(
+                    (List<Map<String, Object>>) result.get("methodResults"));
 
             return TestGenResponse.builder()
                     .success((Boolean) result.getOrDefault("success", false))
@@ -160,15 +167,16 @@ public class OpenCodeAutoGenService {
                     .testClassName((String) result.get("testClassName"))
                     .errorMessage((String) result.get("errorMessage"))
                     .fixRounds((Integer) result.getOrDefault("fixRounds", 0))
-                    .compileResult(TestGenResponse.CompileResult.builder()
+                    .compileResult(CompileResult.builder()
                             .success((Boolean) result.getOrDefault("compileSuccess", false))
                             .errorMessage((String) result.get("compileError"))
                             .build())
-                    .testResult(TestGenResponse.TestResult.builder()
+                    .testResult(TestResult.builder()
                             .success((Boolean) result.getOrDefault("testPassed", false))
                             .passed((Integer) result.getOrDefault("passed", 0))
                             .failed((Integer) result.getOrDefault("failed", 0))
                             .build())
+                    .methodResults(methodResults)
                     .build();
 
         } catch (Exception e) {
@@ -201,6 +209,49 @@ public class OpenCodeAutoGenService {
         }
 
         return null;
+    }
+
+    /**
+     * 解析方法级别结果
+     */
+    private List<MethodTestResult> parseMethodResults(List<Map<String, Object>> methodResults) {
+        if (methodResults == null) {
+            return null;
+        }
+
+        List<MethodTestResult> results = new ArrayList<>();
+        for (Map<String, Object> mr : methodResults) {
+            MethodTestResult methodResult = MethodTestResult.builder()
+                    .methodName((String) mr.get("methodName"))
+                    .startLine((Integer) mr.getOrDefault("startLine", 0))
+                    .endLine((Integer) mr.getOrDefault("endLine", 0))
+                    .testFunctions(parseTestFunctions(
+                            (List<Map<String, Object>>) mr.get("testFunctions")))
+                    .build();
+            results.add(methodResult);
+        }
+        return results;
+    }
+
+    /**
+     * 解析测试函数列表
+     */
+    private List<TestFunction> parseTestFunctions(List<Map<String, Object>> testFunctions) {
+        if (testFunctions == null) {
+            return null;
+        }
+
+        List<TestFunction> results = new ArrayList<>();
+        for (Map<String, Object> tf : testFunctions) {
+            TestFunction testFunction = TestFunction.builder()
+                    .functionName((String) tf.get("functionName"))
+                    .lineNumber((Integer) tf.getOrDefault("lineNumber", 0))
+                    .scenario((String) tf.get("scenario"))
+                    .code((String) tf.get("code"))
+                    .build();
+            results.add(testFunction);
+        }
+        return results;
     }
 
     /**
