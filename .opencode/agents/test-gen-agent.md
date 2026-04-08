@@ -1,7 +1,7 @@
 ---
 name: test-gen-agent
 description: AI单元测试生成专用代理，通过加载Skill指导来完成上下文提取、测试代码生成、编译验证和自动修复的完整流程
-model: custom/gpt-4
+model: custom/glm-4-flash
 tools:
   skill: true
   bash: true

@@ -13,6 +13,8 @@ import org.springframework.stereotype.Component;
 @ConfigurationProperties(prefix = "llm")
 public class LlmProperties {
 
+    /** provider.<id> 的键名 */
+    private String providerId = "custom";
     /**
      * LLM API 地址
      */
@@ -32,6 +34,12 @@ public class LlmProperties {
      * 最大 Token 数
      */
     private int maxTokens = 4096;
+
+    /** limit.context（可选，建议配置） */
+    private Integer context = 200000;
+
+    /** limit.output（可选，建议配置） */
+    private Integer output = 8192;
 
     /**
      * 温度参数

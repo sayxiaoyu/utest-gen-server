@@ -1,5 +1,7 @@
 package com.utest.gen.opencode;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.utest.gen.config.LlmProperties;
 import com.utest.gen.config.OpenCodeProperties;
 import jakarta.annotation.PreDestroy;
@@ -40,6 +42,8 @@ public class OpenCodeManager {
     private Process openCodeProcess;
     private volatile boolean running = false;
 
+    private static final ObjectMapper OM = new ObjectMapper();
+
     /**
      * 应用启动后自动启动 OpenCode Server
      */
@@ -72,8 +76,9 @@ public class OpenCodeManager {
             }
             log.info("OpenCode 工作目录: {}", projectRoot);
 
+            // 启动命令：直接使用 serve，不传项目路径参数
             ProcessBuilder pb = new ProcessBuilder(
-                    serverPath, "serve", "--port", String.valueOf(properties.getPort()), projectRoot
+                    serverPath, "serve", "--port", String.valueOf(properties.getPort())
             );
             pb.redirectErrorStream(true);
             pb.directory(new File(projectRoot));
@@ -127,74 +132,91 @@ public class OpenCodeManager {
     }
 
     /**
-     * 生成 OpenCode 配置文件
-     * 配置自建的 test-gen-agent，使用外部 prompt 文件
+     * 生成 OpenCode 配置文件（兼容 1.4.0：不使用 lsp/agent 等顶层字段）
+     *
+     * 参考文档：
+     * - 提供商：npm/name/options(models)/models/limit 为官方支持字段
+     * - 顶层 lsp 在 1.4.0 会被校验拦截，暂不使用
      */
     private void generateConfigFile() throws IOException {
         String projectRoot = properties.getProjectRoot();
         if (projectRoot == null || projectRoot.isEmpty()) {
             projectRoot = System.getProperty("user.dir");
         }
-        
-        // Windows 路径需要双反斜杠，JSON 才会正确解析
-        String escapedProjectRoot = projectRoot.replace("\\", "\\\\");
-        
-        // 使用 opencode.json 而不是 .opencode.json（项目级配置）
+
         Path configPath = Paths.get(projectRoot, "opencode.json");
-        
-        // 如果配置文件已存在，先删除再重新生成
         if (Files.exists(configPath)) {
             Files.delete(configPath);
             log.info("已删除旧的 OpenCode 配置文件: {}", configPath);
         }
-        
-        // 确保 Agent 配置文件存在
+
+        // 路径仅做提示，不阻塞启动
         Path agentConfigPath = Paths.get(projectRoot, ".opencode", "agents", "test-gen-agent.md");
         if (!Files.exists(agentConfigPath)) {
             log.warn("Agent 配置文件不存在: {}，将使用内联配置", agentConfigPath);
         }
 
-        String configContent = String.format("""
-                {
-                  "$schema": "https://opencode.ai/config.json",
-                  "projectRoot": "%s",
-                  "model": "custom/%s",
-                  "providers": {
-                    "custom": {
-                      "apiKey": "%s",
-                      "baseUrl": "%s"
-                    }
+        // 1) 基础参数
+        String providerId = llmProperties.getProviderId() != null
+                ? llmProperties.getProviderId() : "custom";
+
+        String modelId = llmProperties.getModel();           // 例如 glm-4-flash
+        String baseURL = llmProperties.getApiUrl();          // 例如 https://open.bigmodel.cn/api/paas/v4
+        String apiKey  = llmProperties.getApiKey() != null ? llmProperties.getApiKey() : "";
+
+        Integer context = llmProperties.getContext();        // 128000 / 200000
+        Integer output  = llmProperties.getOutput();         // 4096
+
+        // 2) 固定模板（字段全部来自官方文档示例：npm/name/options/models/limit）
+        String template = """
+            {
+              "$schema": "https://opencode.ai/config.json",
+
+              "model": "%s/%s",
+
+              "provider": {
+                "%s": {
+                  "npm": "@ai-sdk/openai-compatible",
+                  "name": "Custom Provider",
+                  "options": {
+                    "baseURL": "%s",
+                    "apiKey": "%s"
                   },
-                  "lsp": {
-                    "java": {
-                      "command": "jdtls"
-                    }
-                  },
-                  "agent": {
-                    "test-gen-agent": {
-                      "description": "AI单元测试生成专用代理，能够自主完成上下文提取、测试代码生成、编译验证和自动修复的完整流程",
-                      "model": "custom/%s",
-                      "prompt": "file:.opencode/agents/test-gen-agent.md",
-                      "tools": {
-                        "skill": true,
-                        "bash": true,
-                        "write": true,
-                        "read": true
+                  "models": {
+                    "%s": {
+                      "name": "%s",
+                      "limit": {
+                        "context": %d,
+                        "output": %d
                       }
                     }
                   }
                 }
-                """,
-                escapedProjectRoot,
-                llmProperties.getModel(),
-                llmProperties.getApiKey() != null ? llmProperties.getApiKey() : "",
-                llmProperties.getApiUrl(),
-                llmProperties.getModel()
+              }
+            }
+            """.formatted(
+                providerId,
+                modelId,
+
+                providerId,
+                baseURL,
+                apiKey,
+
+                modelId,
+                modelId,
+
+                context != null ? context : 128000,
+                output != null ? output : 8192
         );
 
-        Files.writeString(configPath, configContent);
+        // 3) 用 Jackson 保证 JSON 合法（防止以后手误改坏模板）
+        JsonNode root = OM.readTree(template);
+
+        // 4) 写文件（用 Jackson 的 pretty printer，格式干净）
+        Files.writeString(configPath, OM.writerWithDefaultPrettyPrinter().writeValueAsString(root));
         log.info("已生成 OpenCode 配置文件: {}", configPath);
     }
+
 
     /**
      * 检查服务是否运行中
