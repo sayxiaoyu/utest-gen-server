@@ -4,6 +4,15 @@ server:
 spring:
   application:
     name: utest-gen-server
+  ai:
+    openai:
+      api-key: ${LLM_API_KEY:}
+      base-url: ${LLM_API_URL:http://localhost:8080/v1}
+      chat:
+        options:
+          model: ${LLM_MODEL:gpt-4}
+          max-tokens: 4096
+          temperature: 0.7
 
 # OpenCode 配置
 opencode:
@@ -12,44 +21,39 @@ opencode:
   startup-timeout: 30
   binary-dir: opencode
   request-timeout: 120000
-  # 项目根目录（不配置则默认使用启动时的工作目录，即 System.getProperty("user.dir")）
-  # 如果需要固定项目，取消下面注释并修改为具体路径
-  # project-root: /path/to/your/project
-  # 生成相关配置
   generation:
-    timeout: 120000        # 生成超时时间
-    max-tokens: 4096       # 最大 token 数
-    temperature: 0.7       # 温度参数
-  # 修复相关配置
+    timeout: 120000
+    max-tokens: 4096
+    temperature: 0.7
   fix:
-    max-rounds: 2          # 最大修复次数
-    compile-timeout: 30000 # 编译超时
-    test-timeout: 60000    # 测试运行超时
+    max-rounds: 2
+    compile-timeout: 30000
+    test-timeout: 60000
 
 # LLM 配置（供 OpenCode 本地使用）
 llm:
-  api-url: https://openai.good.hidns.vip/v1
-  api-key: https://github.com/smanx/free-api
-  model: gpt-5.4
+  api-url: ${LLM_API_URL:http://localhost:8080/v1}
+  api-key: ${LLM_API_KEY:}
+  model: ${LLM_MODEL:deepseek-chat}
   max-tokens: 4096
   temperature: 0.7
 
-# 远程后端服务配置
+# 远程后端服务配置（改为仅用于结果同步）
 backend:
-  api-url: http://localhost:8080
-  api-key:
+  api-url: ${BACKEND_API_URL:http://localhost:8080}
+  api-key: ${BACKEND_API_KEY:}
   timeout: 60000
-  sync-enabled: true
+  sync-enabled: true       # 是否启用结果同步
 
 # 提示词模板配置
 prompt:
   template:
-    external-enabled: false
-    template-path: classpath:templates/prompts/
+    external-enabled: false        # 是否启用外部提示词模板
+    template-path: classpath:templates/prompts/  # 模板文件路径
     class-level-template: class-level-prompt.txt
     fix-template: fix-prompt.txt
-    hot-reload: true
-    cache-millis: -1
+    hot-reload: true               # 是否启用热更新
+    cache-millis: -1               # 缓存时间，-1表示每次都重新加载
 
 # 日志配置
 logging:

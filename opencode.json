@@ -1,29 +1,29 @@
 {
-  "$schema": "https://opencode.ai/config.json",
-  "projectRoot": "D:\\JAVA\\ai\\utest-gen-server",
-  "model": "custom/gpt-5.4",
-  "providers": {
-    "custom": {
-      "apiKey": "https://github.com/smanx/free-api",
-      "baseUrl": "https://openai.good.hidns.vip/v1"
-    }
-  },
-  "lsp": {
-    "java": {
-      "command": "jdtls"
-    }
-  },
-  "agent": {
-    "test-gen-agent": {
-      "description": "AI单元测试生成专用代理，能够自主完成上下文提取、测试代码生成、编译验证和自动修复的完整流程",
-      "model": "custom/gpt-5.4",
-      "prompt": "file:.opencode/agents/test-gen-agent.md",
-      "tools": {
-        "skill": true,
-        "bash": true,
-        "write": true,
-        "read": true
+  "$schema" : "https://opencode.ai/config.json",
+  "model" : "custom/deepseek-chat",
+  "provider" : {
+    "custom" : {
+      "npm" : "@ai-sdk/openai-compatible",
+      "name" : "Custom Provider",
+      "options" : {
+        "baseURL" : "http://localhost:8080/v1",
+        "apiKey" : ""
+      },
+      "models" : {
+        "deepseek-chat" : {
+          "name" : "deepseek-chat",
+          "limit" : {
+            "context" : 200000,
+            "output" : 8192
+          }
+        }
       }
     }
+  },
+  "permission" : {
+    "*" : "allow",
+    "read" : "allow",
+    "edit" : "allow",
+    "bash" : "allow"
   }
 }

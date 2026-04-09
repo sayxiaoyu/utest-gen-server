@@ -10,6 +10,14 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
+import org.apache.hc.client5.http.classic.methods.HttpGet;
+import org.apache.hc.client5.http.classic.methods.HttpPatch;
+import org.apache.hc.client5.http.classic.methods.HttpPost;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.core5.http.io.entity.StringEntity;
+import org.apache.hc.core5.http.io.entity.EntityUtils;
+import org.apache.hc.core5.http.ContentType;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -133,7 +141,7 @@ public class OpenCodeManager {
 
     /**
      * 生成 OpenCode 配置文件（兼容 1.4.0：不使用 lsp/agent 等顶层字段）
-     *
+     * <p>
      * 参考文档：
      * - 提供商：npm/name/options(models)/models/limit 为官方支持字段
      * - 顶层 lsp 在 1.4.0 会被校验拦截，暂不使用
@@ -162,39 +170,45 @@ public class OpenCodeManager {
 
         String modelId = llmProperties.getModel();           // 例如 glm-4-flash
         String baseURL = llmProperties.getApiUrl();          // 例如 https://open.bigmodel.cn/api/paas/v4
-        String apiKey  = llmProperties.getApiKey() != null ? llmProperties.getApiKey() : "";
+        String apiKey = llmProperties.getApiKey() != null ? llmProperties.getApiKey() : "";
 
         Integer context = llmProperties.getContext();        // 128000 / 200000
-        Integer output  = llmProperties.getOutput();         // 4096
+        Integer output = llmProperties.getOutput();         // 4096
 
         // 2) 固定模板（字段全部来自官方文档示例：npm/name/options/models/limit）
         String template = """
-            {
-              "$schema": "https://opencode.ai/config.json",
-
-              "model": "%s/%s",
-
-              "provider": {
-                "%s": {
-                  "npm": "@ai-sdk/openai-compatible",
-                  "name": "Custom Provider",
-                  "options": {
-                    "baseURL": "%s",
-                    "apiKey": "%s"
-                  },
-                  "models": {
-                    "%s": {
-                      "name": "%s",
-                      "limit": {
-                        "context": %d,
-                        "output": %d
-                      }
-                    }
-                  }
-                }
-              }
-            }
-            """.formatted(
+                          {
+                            "$schema": "https://opencode.ai/config.json",
+                
+                            "model": "%s/%s",
+                
+                            "provider": {
+                              "%s": {
+                                "npm": "@ai-sdk/openai-compatible",
+                                "name": "Custom Provider",
+                                "options": {
+                                  "baseURL": "%s",
+                                  "apiKey": "%s"
+                                },
+                                "models": {
+                                  "%s": {
+                                    "name": "%s",
+                                    "limit": {
+                                      "context": %d,
+                                      "output": %d
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                             "permission": {
+                              "*": "allow",
+                              "read": "allow",
+                              "edit": "allow",
+                              "bash": "allow"
+                            }
+                          }
+                """.formatted(
                 providerId,
                 modelId,
 
@@ -241,6 +255,271 @@ public class OpenCodeManager {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * 更新 OpenCode 默认模型
+     * 通过 PATCH /config 接口修改配置中的 model 字段
+     *
+     * @param model 模型名称，如 "custom/gpt-4"
+     */
+    public void updateDefaultModel(String model) {
+        try (CloseableHttpClient client = HttpClients.createDefault()) {
+            String url = getServerUrl() + "/config";
+            HttpPatch patch = new HttpPatch(url);
+            patch.setEntity(new StringEntity(String.format("{\"model\":\"%s\"}", model), ContentType.APPLICATION_JSON));
+
+            client.execute(patch, response -> {
+                int code = response.getCode();
+                if (code == 200) {
+                    log.info("已更新 OpenCode 默认模型: {}", model);
+                } else {
+                    log.warn("更新 OpenCode 默认模型返回非预期状态码: {}", code);
+                }
+                return null;
+            });
+        } catch (Exception e) {
+            log.error("更新 OpenCode 默认模型失败: {}", model, e);
+        }
+    }
+
+    /**
+     * 启用自定义 Agent
+     * 通过 PATCH /config 接口将自定义 Agent 添加到配置中
+     *
+     * @param agentName   Agent 名称，如 "test-gen-agent"
+     * @param description Agent 描述
+     * @param model       使用的模型，如 "custom/gpt-4"
+     * @param promptPath  Prompt 文件路径，如 "file:.opencode/agents/test-gen-agent.md"
+     * @param tools       启用的工具列表
+     */
+    public void enableCustomAgent(String agentName, String description, String model,
+                                  String promptPath, String[] tools) {
+        try (CloseableHttpClient client = HttpClients.createDefault()) {
+            String url = getServerUrl() + "/config";
+            HttpPatch patch = new HttpPatch(url);
+
+            StringBuilder toolsJson = new StringBuilder();
+            if (tools != null && tools.length > 0) {
+                toolsJson.append("\"tools\":{");
+                for (int i = 0; i < tools.length; i++) {
+                    if (i > 0) toolsJson.append(",");
+                    toolsJson.append("\"").append(tools[i]).append("\":true");
+                }
+                toolsJson.append("}");
+            }
+
+            String body = String.format(
+                    "{\"agent\":{\"%s\":{\"description\":\"%s\",\"model\":\"%s\",\"prompt\":\"%s\",%s}}}",
+                    agentName, description, model, promptPath, toolsJson
+            );
+            patch.setEntity(new StringEntity(body, ContentType.APPLICATION_JSON));
+
+            client.execute(patch, response -> {
+                int code = response.getCode();
+                if (code == 200) {
+                    log.info("已启用自定义 Agent: {}", agentName);
+                } else {
+                    log.warn("启用自定义 Agent 返回非预期状态码: {}", code);
+                }
+                return null;
+            });
+        } catch (Exception e) {
+            log.error("启用自定义 Agent 失败: {}", agentName, e);
+        }
+    }
+
+    /**
+     * 创建新会话
+     *
+     * @param parentID 父会话ID（可选）
+     * @param title    会话标题（可选）
+     * @return 会话ID
+     */
+    public String createSession(String parentID, String title) {
+        try (CloseableHttpClient client = HttpClients.createDefault()) {
+            String url = getServerUrl() + "/session";
+            HttpPost post = new HttpPost(url);
+
+            StringBuilder body = new StringBuilder("{");
+            boolean first = true;
+            if (parentID != null && !parentID.isEmpty()) {
+                body.append("\"parentID\":\"").append(parentID).append("\"");
+                first = false;
+            }
+            if (title != null && !title.isEmpty()) {
+                if (!first) body.append(",");
+                body.append("\"title\":\"").append(title).append("\"");
+            }
+            body.append("}");
+
+            post.setEntity(new StringEntity(body.toString(), ContentType.APPLICATION_JSON));
+
+            return client.execute(post, response -> {
+                int code = response.getCode();
+                if (code == 200 || code == 201) {
+                    String respStr = EntityUtils.toString(response.getEntity());
+                    String sessionId = extractJsonValue(respStr, "id");
+                    if (sessionId != null) {
+                        log.info("创建会话成功: id={}", sessionId);
+                        return sessionId;
+                    }
+                }
+                throw new RuntimeException("创建会话失败，状态码: " + response.getCode());
+            });
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("创建会话失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 创建新会话（无父会话和标题）
+     */
+    public String createSession() {
+        return createSession(null, null);
+    }
+
+    /**
+     * 发送消息到指定会话并等待响应
+     *
+     * @param sessionId 会话ID
+     * @param message   消息内容
+     * @param agent     Agent 名称（可选）
+     * @return 响应 JSON 字符串
+     */
+    public String sendMessage(String sessionId, String message, String agent) {
+        //String messageId = UUID.randomUUID().toString();
+        String messageId = null;
+        try (CloseableHttpClient client = HttpClients.createDefault()) {
+            String url = getServerUrl() + "/session/" + sessionId + "/prompt_async";
+            HttpPost post = new HttpPost(url);
+
+            String body = buildMessageBodyWithId(message, agent, messageId);
+            post.setEntity(new StringEntity(body, ContentType.APPLICATION_JSON));
+
+            client.execute(post, response -> {
+                int code = response.getCode();
+                if (code == 204) {
+                    return null;
+                }
+                throw new RuntimeException("发送消息失败，状态码: " + code);
+            });
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("发送消息失败: " + e.getMessage(), e);
+        }
+
+        long timeout = 3000000;
+        long interval = 1000;
+        long start = System.currentTimeMillis();
+        while (System.currentTimeMillis() - start < timeout) {
+            try {
+                String messageInfo = getMessage(sessionId, messageId);
+                if (messageInfo != null && !messageInfo.isEmpty() && hasNonEmptyParts(messageInfo)) {
+                    return messageInfo;
+                }
+            } catch (Exception e) {
+                log.debug("轮询消息失败: {}", e.getMessage());
+            }
+            try {
+                Thread.sleep(interval);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("轮询被中断", e);
+            }
+        }
+        throw new RuntimeException("等待消息响应超时");
+    }
+
+    /**
+     * 构建消息请求体
+     * OpenCode API 要求格式: { agent?, model?, messageID?, noReply?, system?, tools?, parts }
+     */
+    private String buildMessageBody(String message, String agent) {
+        return buildMessageBodyWithId(message, agent, null);
+    }
+
+    private String buildMessageBodyWithId(String message, String agent, String messageId) {
+        StringBuilder body = new StringBuilder();
+        body.append("{");
+
+        if (agent != null && !agent.isEmpty()) {
+            body.append("\"agent\":\"").append(agent).append("\"");
+            body.append(",");
+        }
+        if (messageId != null && !messageId.isEmpty()) {
+            body.append("\"messageID\":\"").append(messageId).append("\"");
+            body.append(",");
+        }
+        body.append("\"model\":{\"modelID\":\"").append(llmProperties.getModel()).append("\",\"providerID\":\"deepseek\"}");
+        body.append(",\"parts\":[{\"type\":\"text\",\"text\":\"").append(escapeJson(message)).append("\"}]}");
+
+        return body.toString();
+    }
+
+    private String getMessage(String sessionId, String messageId) {
+        try (CloseableHttpClient client = HttpClients.createDefault()) {
+            String url = getServerUrl() + "/session/" + sessionId + "/message/" + messageId;
+            HttpGet get = new HttpGet(url);
+            return client.execute(get, response -> {
+                int code = response.getCode();
+                if (code == 200) {
+                    return EntityUtils.toString(response.getEntity());
+                } else if (code == 404) {
+                    return null;
+                } else {
+                    throw new RuntimeException("获取消息失败，状态码: " + code);
+                }
+            });
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("获取消息失败: " + e.getMessage(), e);
+        }
+    }
+
+    private String extractJsonValue(String json, String key) {
+        String searchKey = "\"" + key + "\"";
+        int start = json.indexOf(searchKey);
+        if (start == -1) return null;
+        start = json.indexOf(":", start) + 1;
+        while (start < json.length() && Character.isWhitespace(json.charAt(start))) start++;
+        if (start >= json.length()) return null;
+        if (json.charAt(start) == '"') {
+            start++;
+            int end = json.indexOf("\"", start);
+            if (end == -1) return null;
+            return json.substring(start, end);
+        }
+        int end = start;
+        while (end < json.length() && json.charAt(end) != ',' && json.charAt(end) != '}') end++;
+        return json.substring(start, end).trim();
+    }
+
+    private String escapeJson(String value) {
+        return value.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t");
+    }
+
+    private boolean hasNonEmptyParts(String json) {
+        int partsStart = json.indexOf("\"parts\":");
+        if (partsStart == -1) return false;
+        int bracketStart = json.indexOf("[", partsStart);
+        if (bracketStart == -1) return false;
+        int bracketEnd = json.indexOf("]", bracketStart);
+        if (bracketEnd == -1) return false;
+        for (int i = bracketStart + 1; i < bracketEnd; i++) {
+            if (!Character.isWhitespace(json.charAt(i))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.utest.gen.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.utest.gen.model.*;
 import com.utest.gen.opencode.OpenCodeManager;
@@ -58,17 +59,14 @@ public class OpenCodeAutoGenService {
         long startTime = System.currentTimeMillis();
 
         try {
-            // 构建极简 Agent 请求上下文
-            // Agent 通过 Skill 自主推断测试类路径并判断是否存在
-            Map<String, Object> context = new HashMap<>();
-            context.put("sourceFile", sourceFile);
-            context.put("methodNames", methodNames);
+            // 构建 Agent 提示词
+            String prompt = buildAgentPrompt(sourceFile, methodNames);
 
-            // 调用 OpenCode Agent - test-gen-agent 自主完成全流程（含增量更新）
-            Map<String, Object> agentResult = callOpenCodeAgent(context);
+            // 调用 OpenCode Agent - 通过 Session + Message API
+            String messageResponse = callOpenCodeAgent(prompt);
 
             // 解析并收集结果
-            TestGenResponse response = parseAgentResult(agentResult);
+            TestGenResponse response = parseMessageResponse(messageResponse);
 
             long duration = System.currentTimeMillis() - startTime;
             log.info("自动化测试生成完成: requestId={}, duration={}ms, success={}",
@@ -87,44 +85,88 @@ public class OpenCodeAutoGenService {
     }
 
     /**
-     * 调用自建的 test-gen-agent
-     * Agent 配置在 .opencode/agents/test-gen-agent.md 中定义
-     * 包含完整的工作流程和 Skill 调用指导
+     * 调用 OpenCode Agent - 通过 Session + Message API
+     * 流程：创建会话 → 发送消息 → 等待响应
      */
-    private Map<String, Object> callOpenCodeAgent(Map<String, Object> context) {
-        String url = openCodeManager.getServerUrl() + "/api/agent/run";
-        log.info("调用 OpenCode Agent: {}, context={}", url, context);
+    private String callOpenCodeAgent(String prompt) {
+        // 1. 创建会话
+        String sessionId = openCodeManager.createSession(null, "test-gen-" + System.currentTimeMillis());
+        log.info("创建 OpenCode 会话: sessionId={}", sessionId);
 
+        // 2. 发送消息并等待响应
+        log.info("发送消息到 Agent: sessionId={}", sessionId);
+        String response = openCodeManager.sendMessage(sessionId, prompt, "test-gen-agent");
+        log.info("收到 Agent 响应: sessionId={}", sessionId);
+
+        return response;
+    }
+
+    /**
+     * 解析 Message API 返回的响应
+     * 响应格式: { info: {...}, parts: [{ type: "assistant", content: "..." }] }
+     */
+    private TestGenResponse parseMessageResponse(String responseJson) {
         try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
+            JsonNode root = objectMapper.readTree(responseJson);
+            JsonNode parts = root.get("parts");
 
-            // 极简请求：指定 Agent + 传入上下文
-            // test-gen-agent 会根据自身配置自主完成所有步骤
-            Map<String, Object> request = Map.of(
-                    "agent", "test-gen-agent",
-                    "context", context,
-                    "timeout", 600000  // 10分钟超时（包含编译、运行、修复）
-            );
-
-            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(request, headers);
-
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    url,
-                    HttpMethod.POST,
-                    entity,
-                    Map.class
-            );
-
-            if (response.getStatusCode() == HttpStatus.OK && response.getBody() != null) {
-                return response.getBody();
+            if (parts == null || !parts.isArray() || parts.isEmpty()) {
+                return TestGenResponse.failure("Agent 返回结果为空");
             }
 
-            throw new RuntimeException("OpenCode Agent 返回异常: " + response.getStatusCode());
+            // 查找 assistant 类型的 part 中的文本内容
+            String content = null;
+            for (JsonNode part : parts) {
+                JsonNode type = part.get("type");
+                if (type != null && "assistant".equals(type.asText())) {
+                    JsonNode textNode = part.get("text");
+                    if (textNode != null) {
+                        content = textNode.asText();
+                        break;
+                    }
+                }
+            }
+
+            if (content == null || content.isEmpty()) {
+                return TestGenResponse.failure("Agent 返回内容为空");
+            }
+
+            // 从内容中提取JSON
+            String jsonStr = extractJsonFromContent(content);
+
+            if (jsonStr == null) {
+                return TestGenResponse.builder()
+                        .success(false)
+                        .errorMessage("Agent 返回格式异常: " +
+                                content.substring(0, Math.min(200, content.length())))
+                        .build();
+            }
+
+            // 解析JSON结果
+            JsonNode result = objectMapper.readTree(jsonStr);
+
+
+            return TestGenResponse.builder()
+                    .success(result.path("success").asBoolean(false))
+                    .testCode(result.path("testCode").asText(null))
+                    .testFilePath(result.path("testFilePath").asText(null))
+                    .testClassName(result.path("testClassName").asText(null))
+                    .errorMessage(result.path("errorMessage").asText(null))
+                    .fixRounds(result.path("fixRounds").asInt(0))
+                    .compileResult(CompileResult.builder()
+                            .success(result.path("compileSuccess").asBoolean(false))
+                            .errorMessage(result.path("compileError").asText(null))
+                            .build())
+                    .testResult(TestResult.builder()
+                            .success(result.path("testPassed").asBoolean(false))
+                            .passed(result.path("passed").asInt(0))
+                            .failed(result.path("failed").asInt(0))
+                            .build())
+                    .build();
 
         } catch (Exception e) {
-            log.error("调用 OpenCode Agent 失败", e);
-            throw new RuntimeException("Agent 调用失败: " + e.getMessage(), e);
+            log.error("解析 Agent 结果失败", e);
+            return TestGenResponse.failure("解析结果失败: " + e.getMessage());
         }
     }
 
@@ -270,5 +312,15 @@ public class OpenCodeAutoGenService {
      */
     private String generateRequestId() {
         return "auto-" + System.currentTimeMillis();
+    }
+
+    /**
+     * 构建发送给 Agent 的提示词
+     */
+    private String buildAgentPrompt(String sourceFile, List<String> methodNames) {
+        return String.format(
+                "为 %s 中的以下方法生成单元测试: %s\n",
+                sourceFile, String.join(", ", methodNames)
+        );
     }
 }
