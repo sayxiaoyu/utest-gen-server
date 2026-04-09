@@ -561,7 +561,11 @@ public class OpenCodeManager {
             body.append("\"agent\":\"").append(agent).append("\"");
             body.append(",");
         }
-        body.append("\"model\":{\"modelID\":\"").append(llmProperties.getModel()).append("\",\"providerID\":\"deepseek\"}");
+        body.append("\"model\":{\"modelID\":\"")
+                .append(llmProperties.getModel())
+                .append("\",\"providerID\":\"")
+                .append(llmProperties.getProviderId())
+                .append("\"}");
         body.append(",\"parts\":[{\"type\":\"text\",\"text\":\"").append(escapeJson(message)).append("\"}]}");
 
         return body.toString();

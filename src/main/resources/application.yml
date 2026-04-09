@@ -32,9 +32,9 @@ opencode:
 
 # LLM 配置（供 OpenCode 本地使用）
 llm:
-  api-url: ${LLM_API_URL:http://localhost:8080/v1}
+  api-url: ${LLM_API_URL:https://open.bigmodel.cn/api/paas/v4}
   api-key: ${LLM_API_KEY:}
-  model: ${LLM_MODEL:deepseek-chat}
+  model: ${LLM_MODEL:glm-4.7-flash}
   max-tokens: 4096
   temperature: 0.7
 

@@ -1,7 +1,6 @@
 ---
 name: test-gen-agent
 description: AI单元测试生成专用代理，通过加载Skill指导来完成上下文提取、测试代码生成、编译验证和自动修复的完整流程
-model: custom/glm-4-flash
 tools:
   skill: true
   bash: true
@@ -214,3 +213,4 @@ tools:
 4. 修复次数不超过2次
 5. 只输出可直接编译运行的Java代码
 6. 包含所有必要的import语句
+7. 禁止修改其他文件中的内容，只对生成的测试文件做调整
