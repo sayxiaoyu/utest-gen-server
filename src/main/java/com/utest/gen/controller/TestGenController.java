@@ -1,14 +1,18 @@
 package com.utest.gen.controller;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.utest.gen.model.TestGenResponse;
 import com.utest.gen.service.OpenCodeAutoGenService;
 import com.utest.gen.opencode.OpenCodeManager;
 import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
@@ -127,6 +131,67 @@ public class TestGenController {
     }
 
     /**
+     * 查询会话详情
+     */
+    @GetMapping("/session/{sessionId}")
+    public ResponseEntity<SessionDetailResponse> getSession(@PathVariable String sessionId) {
+        try {
+            String sessionJson = openCodeManager.getSession(sessionId);
+            JsonNode session = new ObjectMapper().readTree(sessionJson);
+            
+            return ResponseEntity.ok(SessionDetailResponse.builder()
+                    .id(session.path("id").asText())
+                    .title(session.path("title").asText(null))
+                    .parentID(session.path("parentID").asText(null))
+                    .created(session.path("created").asText(null))
+                    .updated(session.path("updated").asText(null))
+                    .shareID(session.path("shareID").asText(null))
+                    .rawJson(sessionJson)
+                    .build());
+        } catch (Exception e) {
+            log.error("查询会话详情失败: sessionId={}", sessionId, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(SessionDetailResponse.builder()
+                            .id(sessionId)
+                            .errorMessage("查询失败: " + e.getMessage())
+                            .build());
+        }
+    }
+
+    /**
+     * 列出所有会话
+     */
+    @GetMapping("/sessions")
+    public ResponseEntity<SessionListResponse> listSessions() {
+        try {
+            String sessionsJson = openCodeManager.listSessions();
+            JsonNode sessions = new ObjectMapper().readTree(sessionsJson);
+            
+            List<SessionSummary> sessionList = new ArrayList<>();
+            if (sessions.isArray()) {
+                for (JsonNode s : sessions) {
+                    sessionList.add(SessionSummary.builder()
+                            .id(s.path("id").asText())
+                            .title(s.path("title").asText(null))
+                            .created(s.path("created").asText(null))
+                            .build());
+                }
+            }
+            
+            return ResponseEntity.ok(SessionListResponse.builder()
+                    .total(sessionList.size())
+                    .sessions(sessionList)
+                    .build());
+        } catch (Exception e) {
+            log.error("列出会话失败", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(SessionListResponse.builder()
+                            .errorMessage("查询失败: " + e.getMessage())
+                            .build());
+        }
+    }
+
+    /**
      * 生成请求
      * 极简参数：只需源文件路径和待测方法列表
      */
@@ -193,5 +258,43 @@ public class TestGenController {
         private String testFilePath;
         private String errorMessage;
         private long durationMs;
+    }
+
+    /**
+     * 会话详情响应
+     */
+    @lombok.Data
+    @lombok.Builder
+    public static class SessionDetailResponse {
+        private String id;
+        private String title;
+        private String parentID;
+        private String created;
+        private String updated;
+        private String shareID;
+        private String errorMessage;
+        private String rawJson;
+    }
+
+    /**
+     * 会话列表响应
+     */
+    @lombok.Data
+    @lombok.Builder
+    public static class SessionListResponse {
+        private int total;
+        private List<SessionSummary> sessions;
+        private String errorMessage;
+    }
+
+    /**
+     * 会话摘要
+     */
+    @lombok.Data
+    @lombok.Builder
+    public static class SessionSummary {
+        private String id;
+        private String title;
+        private String created;
     }
 }

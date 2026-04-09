@@ -382,6 +382,57 @@ public class OpenCodeManager {
     }
 
     /**
+     * 获取会话详情
+     *
+     * @param sessionId 会话ID
+     * @return 会话详情 JSON 字符串
+     */
+    public String getSession(String sessionId) {
+        try (CloseableHttpClient client = HttpClients.createDefault()) {
+            String url = getServerUrl() + "/session/" + sessionId;
+            HttpGet get = new HttpGet(url);
+            return client.execute(get, response -> {
+                int code = response.getCode();
+                if (code == 200) {
+                    return EntityUtils.toString(response.getEntity());
+                } else if (code == 404) {
+                    throw new RuntimeException("会话不存在: " + sessionId);
+                } else {
+                    throw new RuntimeException("获取会话详情失败，状态码: " + code);
+                }
+            });
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("获取会话详情失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 列出所有会话
+     *
+     * @return 会话列表 JSON 字符串
+     */
+    public String listSessions() {
+        try (CloseableHttpClient client = HttpClients.createDefault()) {
+            String url = getServerUrl() + "/session";
+            HttpGet get = new HttpGet(url);
+            return client.execute(get, response -> {
+                int code = response.getCode();
+                if (code == 200) {
+                    return EntityUtils.toString(response.getEntity());
+                } else {
+                    throw new RuntimeException("列出会话失败，状态码: " + code);
+                }
+            });
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("列出会话失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
      * 发送消息到指定会话并等待响应
      *
      * @param sessionId 会话ID
@@ -390,13 +441,11 @@ public class OpenCodeManager {
      * @return 响应 JSON 字符串
      */
     public String sendMessage(String sessionId, String message, String agent) {
-        //String messageId = UUID.randomUUID().toString();
-        String messageId = null;
         try (CloseableHttpClient client = HttpClients.createDefault()) {
             String url = getServerUrl() + "/session/" + sessionId + "/prompt_async";
             HttpPost post = new HttpPost(url);
 
-            String body = buildMessageBodyWithId(message, agent, messageId);
+            String body = buildMessageBody(message, agent);
             post.setEntity(new StringEntity(body, ContentType.APPLICATION_JSON));
 
             client.execute(post, response -> {
@@ -412,17 +461,17 @@ public class OpenCodeManager {
             throw new RuntimeException("发送消息失败: " + e.getMessage(), e);
         }
 
-        long timeout = 3000000;
+        long timeout = 900000;
         long interval = 1000;
         long start = System.currentTimeMillis();
         while (System.currentTimeMillis() - start < timeout) {
             try {
-                String messageInfo = getMessage(sessionId, messageId);
-                if (messageInfo != null && !messageInfo.isEmpty() && hasNonEmptyParts(messageInfo)) {
-                    return messageInfo;
+                String statusJson = getSessionStatus(sessionId);
+                if (isSessionComplete(statusJson)) {
+                    return getSessionMessages(sessionId);
                 }
             } catch (Exception e) {
-                log.debug("轮询消息失败: {}", e.getMessage());
+                log.debug("轮询会话状态失败: {}", e.getMessage());
             }
             try {
                 Thread.sleep(interval);
@@ -431,18 +480,80 @@ public class OpenCodeManager {
                 throw new RuntimeException("轮询被中断", e);
             }
         }
-        throw new RuntimeException("等待消息响应超时");
+        throw new RuntimeException("等待会话响应超时");
+    }
+
+    /**
+     * 获取会话状态
+     *
+     * @param sessionId 会话ID
+     * @return 状态 JSON 字符串
+     */
+    private String getSessionStatus(String sessionId) {
+        try (CloseableHttpClient client = HttpClients.createDefault()) {
+            String url = getServerUrl() + "/session/status";
+            HttpGet get = new HttpGet(url);
+            return client.execute(get, response -> {
+                int code = response.getCode();
+                if (code == 200) {
+                    return EntityUtils.toString(response.getEntity());
+                } else {
+                    throw new RuntimeException("获取会话状态失败，状态码: " + code);
+                }
+            });
+        } catch (Exception e) {
+            throw new RuntimeException("获取会话状态失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 检查会话是否完成
+     *
+     * @param statusJson 状态 JSON
+     * @return 是否完成
+     */
+    private boolean isSessionComplete(String statusJson) {
+        try {
+            JsonNode root = OM.readTree(statusJson);
+            JsonNode sessionStatus = root.get("status");
+            if (sessionStatus != null && sessionStatus.has("idle")) {
+                return sessionStatus.get("idle").asBoolean(false);
+            }
+            return false;
+        } catch (Exception e) {
+            log.debug("解析会话状态失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 获取会话的所有消息
+     *
+     * @param sessionId 会话ID
+     * @return 消息 JSON 字符串
+     */
+    private String getSessionMessages(String sessionId) {
+        try (CloseableHttpClient client = HttpClients.createDefault()) {
+            String url = getServerUrl() + "/session/" + sessionId + "/message";
+            HttpGet get = new HttpGet(url);
+            return client.execute(get, response -> {
+                int code = response.getCode();
+                if (code == 200) {
+                    return EntityUtils.toString(response.getEntity());
+                } else {
+                    throw new RuntimeException("获取会话消息失败，状态码: " + code);
+                }
+            });
+        } catch (Exception e) {
+            throw new RuntimeException("获取会话消息失败: " + e.getMessage(), e);
+        }
     }
 
     /**
      * 构建消息请求体
-     * OpenCode API 要求格式: { agent?, model?, messageID?, noReply?, system?, tools?, parts }
+     * OpenCode API 要求格式: { agent?, model?, noReply?, system?, tools?, parts }
      */
     private String buildMessageBody(String message, String agent) {
-        return buildMessageBodyWithId(message, agent, null);
-    }
-
-    private String buildMessageBodyWithId(String message, String agent, String messageId) {
         StringBuilder body = new StringBuilder();
         body.append("{");
 
@@ -450,35 +561,10 @@ public class OpenCodeManager {
             body.append("\"agent\":\"").append(agent).append("\"");
             body.append(",");
         }
-        if (messageId != null && !messageId.isEmpty()) {
-            body.append("\"messageID\":\"").append(messageId).append("\"");
-            body.append(",");
-        }
         body.append("\"model\":{\"modelID\":\"").append(llmProperties.getModel()).append("\",\"providerID\":\"deepseek\"}");
         body.append(",\"parts\":[{\"type\":\"text\",\"text\":\"").append(escapeJson(message)).append("\"}]}");
 
         return body.toString();
-    }
-
-    private String getMessage(String sessionId, String messageId) {
-        try (CloseableHttpClient client = HttpClients.createDefault()) {
-            String url = getServerUrl() + "/session/" + sessionId + "/message/" + messageId;
-            HttpGet get = new HttpGet(url);
-            return client.execute(get, response -> {
-                int code = response.getCode();
-                if (code == 200) {
-                    return EntityUtils.toString(response.getEntity());
-                } else if (code == 404) {
-                    return null;
-                } else {
-                    throw new RuntimeException("获取消息失败，状态码: " + code);
-                }
-            });
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("获取消息失败: " + e.getMessage(), e);
-        }
     }
 
     private String extractJsonValue(String json, String key) {
@@ -505,21 +591,6 @@ public class OpenCodeManager {
                 .replace("\n", "\\n")
                 .replace("\r", "\\r")
                 .replace("\t", "\\t");
-    }
-
-    private boolean hasNonEmptyParts(String json) {
-        int partsStart = json.indexOf("\"parts\":");
-        if (partsStart == -1) return false;
-        int bracketStart = json.indexOf("[", partsStart);
-        if (bracketStart == -1) return false;
-        int bracketEnd = json.indexOf("]", bracketStart);
-        if (bracketEnd == -1) return false;
-        for (int i = bracketStart + 1; i < bracketEnd; i++) {
-            if (!Character.isWhitespace(json.charAt(i))) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
