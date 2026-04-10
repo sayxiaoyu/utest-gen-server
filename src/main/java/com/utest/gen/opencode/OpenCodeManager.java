@@ -29,7 +29,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFilePermission;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -433,7 +435,7 @@ public class OpenCodeManager {
     }
 
     /**
-     * 发送消息到指定会话并等待响应
+     * 发送消息到指定会话并异步等待响应
      *
      * @param sessionId 会话ID
      * @param message   消息内容
@@ -451,28 +453,77 @@ public class OpenCodeManager {
             client.execute(post, response -> {
                 int code = response.getCode();
                 if (code == 204) {
+                    log.debug("异步消息发送成功: sessionId={}", sessionId);
                     return null;
                 }
-                throw new RuntimeException("发送消息失败，状态码: " + code);
+                throw new RuntimeException("异步发送消息失败，状态码: " + code);
             });
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
-            throw new RuntimeException("发送消息失败: " + e.getMessage(), e);
+            throw new RuntimeException("异步发送消息失败: " + e.getMessage(), e);
         }
 
-        long timeout = 900000;
-        long interval = 1000;
+        long timeout = 900000; // 5分钟超时
+        long interval = 10000;  // 1秒间隔
         long start = System.currentTimeMillis();
+        int nullStatusCount = 0; // 连续状态为null的计数器
+        
+
+        
+        // 发送异步请求后等待1秒，让OpenCode Server有时间创建会话状态
+        try {
+            Thread.sleep(1000);
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("初始等待被中断", e);
+        }
+        
         while (System.currentTimeMillis() - start < timeout) {
             try {
                 String statusJson = getSessionStatus(sessionId);
-                if (isSessionComplete(statusJson)) {
-                    return getSessionMessages(sessionId);
+
+                
+                if (statusJson == null) {
+                    nullStatusCount++;
+
+                    
+                    // 状态为null，尝试直接获取消息
+                    try {
+                        String latestMessage = getLatestSessionMessage(sessionId);
+
+                        return latestMessage;
+                    } catch (Exception e) {
+                        // 如果获取消息失败，可能是会话尚未开始处理
+                        if (e.getMessage() != null && (e.getMessage().contains("404") || 
+                                                       e.getMessage().contains("不存在") || 
+                                                       e.getMessage().contains("未找到"))) {
+
+                            // 继续轮询
+                        } else {
+
+                            // 其他错误，继续轮询
+                        }
+                    }
+                    
+                    // 如果连续10次状态为null且无法获取消息，可能有问题
+                    if (nullStatusCount > 10) {
+                        log.warn("连续{}次获取到null状态且无法获取消息，会话可能异常", nullStatusCount);
+                    }
+                } else if (isSessionComplete(statusJson)) {
+                    log.debug("会话已完成，获取最新消息: sessionId={}", sessionId);
+                    return getLatestSessionMessage(sessionId);
+                } else {
+                    // 状态存在但未完成，重置null状态计数器
+                    nullStatusCount = 0;
+
                 }
             } catch (Exception e) {
-                log.debug("轮询会话状态失败: {}", e.getMessage());
+
+                nullStatusCount++;
             }
+            
             try {
                 Thread.sleep(interval);
             } catch (InterruptedException e) {
@@ -480,14 +531,15 @@ public class OpenCodeManager {
                 throw new RuntimeException("轮询被中断", e);
             }
         }
-        throw new RuntimeException("等待会话响应超时");
+        
+        throw new RuntimeException("等待会话响应超时: " + timeout + "ms");
     }
 
     /**
      * 获取会话状态
      *
      * @param sessionId 会话ID
-     * @return 状态 JSON 字符串
+     * @return 状态 JSON 字符串，或null如果会话不存在
      */
     private String getSessionStatus(String sessionId) {
         try (CloseableHttpClient client = HttpClients.createDefault()) {
@@ -496,12 +548,46 @@ public class OpenCodeManager {
             return client.execute(get, response -> {
                 int code = response.getCode();
                 if (code == 200) {
-                    return EntityUtils.toString(response.getEntity());
+                    String allStatusJson = EntityUtils.toString(response.getEntity());
+
+                    
+                    // 尝试解析JSON
+                    try {
+                        JsonNode root = OM.readTree(allStatusJson);
+                        
+                        // 检查是否是对象类型
+                        if (!root.isObject()) {
+                            log.warn("会话状态响应不是JSON对象: {}", allStatusJson);
+                            return null;
+                        }
+                        
+                        // 检查响应中是否包含该sessionId
+                        if (root.has(sessionId)) {
+                            JsonNode sessionStatus = root.get(sessionId);
+                            String statusStr = sessionStatus.toString();
+
+                            return statusStr;
+                        } else {
+                            // 列出所有可用的sessionId用于调试
+                            java.util.Iterator<String> fieldNames = root.fieldNames();
+                            List<String> availableSessions = new ArrayList<>();
+                            while (fieldNames.hasNext()) {
+                                availableSessions.add(fieldNames.next());
+                            }
+
+                            return null;
+                        }
+                    } catch (Exception e) {
+                        log.warn("解析会话状态JSON失败: {}, 原始响应: {}", e.getMessage(), allStatusJson);
+                        return null;
+                    }
                 } else {
+                    log.warn("获取会话状态失败，状态码: {}", code);
                     throw new RuntimeException("获取会话状态失败，状态码: " + code);
                 }
             });
         } catch (Exception e) {
+            log.warn("获取会话状态异常: {}", e.getMessage());
             throw new RuntimeException("获取会话状态失败: " + e.getMessage(), e);
         }
     }
@@ -509,37 +595,81 @@ public class OpenCodeManager {
     /**
      * 检查会话是否完成
      *
-     * @param statusJson 状态 JSON
+     * @param statusJson 状态 JSON 字符串，或null如果会话不存在
      * @return 是否完成
      */
     private boolean isSessionComplete(String statusJson) {
+        if (statusJson == null) {
+            // 状态为null，不由这个方法处理，由调用者处理
+
+            return false;
+        }
         try {
-            JsonNode root = OM.readTree(statusJson);
-            JsonNode sessionStatus = root.get("status");
-            if (sessionStatus != null && sessionStatus.has("idle")) {
-                return sessionStatus.get("idle").asBoolean(false);
+            JsonNode status = OM.readTree(statusJson);
+
+            
+            // 检查各种可能的完成状态字段
+            if (status.has("idle")) {
+                boolean idle = status.get("idle").asBoolean(false);
+
+                return idle;
             }
+            
+            // 如果没有idle字段，检查其他可能的状态字段
+            if (status.has("status")) {
+                String statusStr = status.get("status").asText();
+                boolean complete = "idle".equals(statusStr) || "complete".equals(statusStr) || "done".equals(statusStr);
+
+                return complete;
+            }
+            
+
             return false;
         } catch (Exception e) {
-            log.debug("解析会话状态失败: {}", e.getMessage());
+
             return false;
         }
     }
 
     /**
-     * 获取会话的所有消息
+     * 获取会话的最新消息（通常是刚完成的assistant响应）
      *
      * @param sessionId 会话ID
-     * @return 消息 JSON 字符串
+     * @return 最新消息 JSON 字符串
      */
-    private String getSessionMessages(String sessionId) {
+    private String getLatestSessionMessage(String sessionId) {
         try (CloseableHttpClient client = HttpClients.createDefault()) {
             String url = getServerUrl() + "/session/" + sessionId + "/message";
             HttpGet get = new HttpGet(url);
             return client.execute(get, response -> {
                 int code = response.getCode();
                 if (code == 200) {
-                    return EntityUtils.toString(response.getEntity());
+                    String messagesJson = EntityUtils.toString(response.getEntity());
+
+                    
+                    // 解析消息数组，找到最新的assistant消息
+                    JsonNode messages = OM.readTree(messagesJson);
+                    if (messages.isArray() && messages.size() > 0) {
+                        // 从后往前查找最新的assistant消息
+                        for (int i = messages.size() - 1; i >= 0; i--) {
+                            JsonNode msg = messages.get(i);
+                            JsonNode info = msg.get("info");
+                            if (info != null && info.has("role")) {
+                                String role = info.get("role").asText();
+                                if ("assistant".equals(role)) {
+                                    String latestMsg = msg.toString();
+
+                                    return latestMsg;
+                                }
+                            }
+                        }
+                        // 如果没有找到assistant消息，返回最后一条消息
+                        String lastMsg = messages.get(messages.size() - 1).toString();
+
+                        return lastMsg;
+                    } else {
+                        throw new RuntimeException("会话消息为空或格式错误");
+                    }
                 } else {
                     throw new RuntimeException("获取会话消息失败，状态码: " + code);
                 }
@@ -561,7 +691,7 @@ public class OpenCodeManager {
             body.append("\"agent\":\"").append(agent).append("\"");
             body.append(",");
         }
-        body.append("\"model\":{\"modelID\":\"").append(llmProperties.getModel()).append("\",\"providerID\":\"deepseek\"}");
+        body.append("\"model\":{\"modelID\":\"").append(llmProperties.getModel()).append("\",\"providerID\":\"opencode\"}");
         body.append(",\"parts\":[{\"type\":\"text\",\"text\":\"").append(escapeJson(message)).append("\"}]}");
 
         return body.toString();
