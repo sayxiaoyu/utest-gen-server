@@ -468,9 +468,9 @@ public class OpenCodeManager {
         long interval = 10000;  // 1秒间隔
         long start = System.currentTimeMillis();
         int nullStatusCount = 0; // 连续状态为null的计数器
-        
 
-        
+
+
         // 发送异步请求后等待1秒，让OpenCode Server有时间创建会话状态
         try {
             Thread.sleep(1000);
@@ -479,16 +479,16 @@ public class OpenCodeManager {
             Thread.currentThread().interrupt();
             throw new RuntimeException("初始等待被中断", e);
         }
-        
+
         while (System.currentTimeMillis() - start < timeout) {
             try {
                 String statusJson = getSessionStatus(sessionId);
 
-                
+
                 if (statusJson == null) {
                     nullStatusCount++;
 
-                    
+
                     // 状态为null，尝试直接获取消息
                     try {
                         String latestMessage = getLatestSessionMessage(sessionId);
@@ -496,8 +496,8 @@ public class OpenCodeManager {
                         return latestMessage;
                     } catch (Exception e) {
                         // 如果获取消息失败，可能是会话尚未开始处理
-                        if (e.getMessage() != null && (e.getMessage().contains("404") || 
-                                                       e.getMessage().contains("不存在") || 
+                        if (e.getMessage() != null && (e.getMessage().contains("404") ||
+                                                       e.getMessage().contains("不存在") ||
                                                        e.getMessage().contains("未找到"))) {
 
                             // 继续轮询
@@ -506,7 +506,7 @@ public class OpenCodeManager {
                             // 其他错误，继续轮询
                         }
                     }
-                    
+
                     // 如果连续10次状态为null且无法获取消息，可能有问题
                     if (nullStatusCount > 10) {
                         log.warn("连续{}次获取到null状态且无法获取消息，会话可能异常", nullStatusCount);
@@ -523,7 +523,7 @@ public class OpenCodeManager {
 
                 nullStatusCount++;
             }
-            
+
             try {
                 Thread.sleep(interval);
             } catch (InterruptedException e) {
@@ -531,7 +531,7 @@ public class OpenCodeManager {
                 throw new RuntimeException("轮询被中断", e);
             }
         }
-        
+
         throw new RuntimeException("等待会话响应超时: " + timeout + "ms");
     }
 
@@ -550,17 +550,17 @@ public class OpenCodeManager {
                 if (code == 200) {
                     String allStatusJson = EntityUtils.toString(response.getEntity());
 
-                    
+
                     // 尝试解析JSON
                     try {
                         JsonNode root = OM.readTree(allStatusJson);
-                        
+
                         // 检查是否是对象类型
                         if (!root.isObject()) {
                             log.warn("会话状态响应不是JSON对象: {}", allStatusJson);
                             return null;
                         }
-                        
+
                         // 检查响应中是否包含该sessionId
                         if (root.has(sessionId)) {
                             JsonNode sessionStatus = root.get(sessionId);
@@ -607,14 +607,14 @@ public class OpenCodeManager {
         try {
             JsonNode status = OM.readTree(statusJson);
 
-            
+
             // 检查各种可能的完成状态字段
             if (status.has("idle")) {
                 boolean idle = status.get("idle").asBoolean(false);
 
                 return idle;
             }
-            
+
             // 如果没有idle字段，检查其他可能的状态字段
             if (status.has("status")) {
                 String statusStr = status.get("status").asText();
@@ -622,7 +622,7 @@ public class OpenCodeManager {
 
                 return complete;
             }
-            
+
 
             return false;
         } catch (Exception e) {
@@ -646,7 +646,7 @@ public class OpenCodeManager {
                 if (code == 200) {
                     String messagesJson = EntityUtils.toString(response.getEntity());
 
-                    
+
                     // 解析消息数组，找到最新的assistant消息
                     JsonNode messages = OM.readTree(messagesJson);
                     if (messages.isArray() && messages.size() > 0) {
@@ -691,7 +691,11 @@ public class OpenCodeManager {
             body.append("\"agent\":\"").append(agent).append("\"");
             body.append(",");
         }
-        body.append("\"model\":{\"modelID\":\"").append(llmProperties.getModel()).append("\",\"providerID\":\"opencode\"}");
+        body.append("\"model\":{\"modelID\":\"")
+                .append(llmProperties.getModel())
+                .append("\",\"providerID\":\"")
+                .append(llmProperties.getProviderId())
+                .append("\"}");
         body.append(",\"parts\":[{\"type\":\"text\",\"text\":\"").append(escapeJson(message)).append("\"}]}");
 
         return body.toString();

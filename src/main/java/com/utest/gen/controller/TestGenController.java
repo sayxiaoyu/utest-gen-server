@@ -2,6 +2,7 @@ package com.utest.gen.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.utest.gen.dto.*;
 import com.utest.gen.model.TestGenResponse;
 import com.utest.gen.service.OpenCodeAutoGenService;
 import com.utest.gen.opencode.OpenCodeManager;
@@ -15,6 +16,9 @@ import org.springframework.web.bind.annotation.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -31,6 +35,12 @@ public class TestGenController {
 
     @Autowired
     private OpenCodeManager openCodeManager;
+
+    @Autowired
+    private ObjectMapper objectMapper;
+
+    // 用于批量任务的线程池（IO 密集型，线程数可配置）
+    private final ExecutorService batchExecutor = Executors.newFixedThreadPool(10);
 
     /**
      * 生成单元测试（单个类）
@@ -56,6 +66,7 @@ public class TestGenController {
      * 
      * 支持同时传入多个类的待测方法，并行处理
      * 每个类独立调用 Agent 完成全流程
+     * 默认超时：15分钟
      */
     @PostMapping("/generate-batch")
     public ResponseEntity<BatchGenerateResponse> generateBatch(
@@ -64,31 +75,52 @@ public class TestGenController {
         
         long startTime = System.currentTimeMillis();
         
-        // 并行处理每个类的测试生成
+        // 并行处理每个类的测试生成，使用自定义线程池
         List<CompletableFuture<ClassResult>> futures = request.getClasses().stream()
                 .map(classRequest -> CompletableFuture.supplyAsync(() -> {
                     long classStartTime = System.currentTimeMillis();
-                    TestGenResponse response = openCodeAutoGenService.autoGenerate(
-                            classRequest.getSourceFile(),
-                            classRequest.getMethodNames()
-                    );
-                    long classDuration = System.currentTimeMillis() - classStartTime;
-                    
-                    return ClassResult.builder()
-                            .sourceFile(classRequest.getSourceFile())
-                            .methodNames(classRequest.getMethodNames())
-                            .success(response.isSuccess())
-                            .testClassName(response.getTestClassName())
-                            .testFilePath(response.getTestFilePath())
-                            .errorMessage(response.getErrorMessage())
-                            .durationMs(classDuration)
-                            .build();
-                }))
-                .collect(Collectors.toList());
+                    try {
+                        TestGenResponse response = openCodeAutoGenService.autoGenerate(
+                                classRequest.getSourceFile(),
+                                classRequest.getMethodNames()
+                        );
+                        long classDuration = System.currentTimeMillis() - classStartTime;
+                        
+                        return ClassResult.builder()
+                                .sourceFile(classRequest.getSourceFile())
+                                .methodNames(classRequest.getMethodNames())
+                                .success(response.isSuccess())
+                                .testClassName(response.getTestClassName())
+                                .testFilePath(response.getTestFilePath())
+                                .errorMessage(response.getErrorMessage())
+                                .durationMs(classDuration)
+                                .build();
+                    } catch (Exception e) {
+                        log.error("生成测试失败: sourceFile={}", classRequest.getSourceFile(), e);
+                        return ClassResult.builder()
+                                .sourceFile(classRequest.getSourceFile())
+                                .methodNames(classRequest.getMethodNames())
+                                .success(false)
+                                .errorMessage("生成失败: " + e.getMessage())
+                                .durationMs(System.currentTimeMillis() - classStartTime)
+                                .build();
+                    }
+                }, batchExecutor))
+                .toList();
         
-        // 收集所有结果
+        // 收集所有结果，带超时控制
         List<ClassResult> results = futures.stream()
-                .map(CompletableFuture::join)
+                .map(future -> {
+                    try {
+                        return future.get(15, TimeUnit.MINUTES);
+                    } catch (Exception e) {
+                        log.error("批量生成任务超时或失败", e);
+                        return ClassResult.builder()
+                                .success(false)
+                                .errorMessage("任务执行失败: " + e.getMessage())
+                                .build();
+                    }
+                })
                 .collect(Collectors.toList());
         
         long totalDuration = System.currentTimeMillis() - startTime;
@@ -137,7 +169,7 @@ public class TestGenController {
     public ResponseEntity<SessionDetailResponse> getSession(@PathVariable String sessionId) {
         try {
             String sessionJson = openCodeManager.getSession(sessionId);
-            JsonNode session = new ObjectMapper().readTree(sessionJson);
+            JsonNode session = objectMapper.readTree(sessionJson);
             
             return ResponseEntity.ok(SessionDetailResponse.builder()
                     .id(session.path("id").asText())
@@ -165,7 +197,7 @@ public class TestGenController {
     public ResponseEntity<SessionListResponse> listSessions() {
         try {
             String sessionsJson = openCodeManager.listSessions();
-            JsonNode sessions = new ObjectMapper().readTree(sessionsJson);
+            JsonNode sessions = objectMapper.readTree(sessionsJson);
             
             List<SessionSummary> sessionList = new ArrayList<>();
             if (sessions.isArray()) {
@@ -189,112 +221,5 @@ public class TestGenController {
                             .errorMessage("查询失败: " + e.getMessage())
                             .build());
         }
-    }
-
-    /**
-     * 生成请求
-     * 极简参数：只需源文件路径和待测方法列表
-     */
-    @lombok.Data
-    @lombok.Builder
-    @lombok.NoArgsConstructor
-    @lombok.AllArgsConstructor
-    public static class GenerateRequest {
-        @jakarta.validation.constraints.NotBlank(message = "源文件路径不能为空")
-        private String sourceFile;
-
-        @jakarta.validation.constraints.NotEmpty(message = "方法列表不能为空")
-        private List<String> methodNames;
-    }
-
-    /**
-     * 状态响应
-     */
-    @lombok.Data
-    @lombok.Builder
-    public static class StatusResponse {
-        private String status;
-        private String openCodeServer;
-        private boolean lspReady;
-        private String version;
-    }
-
-    /**
-     * 批量生成请求
-     */
-    @lombok.Data
-    @lombok.Builder
-    @lombok.NoArgsConstructor
-    @lombok.AllArgsConstructor
-    public static class BatchGenerateRequest {
-        @jakarta.validation.constraints.NotEmpty(message = "类列表不能为空")
-        private List<GenerateRequest> classes;
-    }
-
-    /**
-     * 批量生成响应
-     */
-    @lombok.Data
-    @lombok.Builder
-    public static class BatchGenerateResponse {
-        private boolean success;
-        private int total;
-        private int successCount;
-        private int failedCount;
-        private long totalDurationMs;
-        private List<ClassResult> results;
-    }
-
-    /**
-     * 单个类的生成结果
-     */
-    @lombok.Data
-    @lombok.Builder
-    public static class ClassResult {
-        private String sourceFile;
-        private List<String> methodNames;
-        private boolean success;
-        private String testClassName;
-        private String testFilePath;
-        private String errorMessage;
-        private long durationMs;
-    }
-
-    /**
-     * 会话详情响应
-     */
-    @lombok.Data
-    @lombok.Builder
-    public static class SessionDetailResponse {
-        private String id;
-        private String title;
-        private String parentID;
-        private String created;
-        private String updated;
-        private String shareID;
-        private String errorMessage;
-        private String rawJson;
-    }
-
-    /**
-     * 会话列表响应
-     */
-    @lombok.Data
-    @lombok.Builder
-    public static class SessionListResponse {
-        private int total;
-        private List<SessionSummary> sessions;
-        private String errorMessage;
-    }
-
-    /**
-     * 会话摘要
-     */
-    @lombok.Data
-    @lombok.Builder
-    public static class SessionSummary {
-        private String id;
-        private String title;
-        private String created;
     }
 }

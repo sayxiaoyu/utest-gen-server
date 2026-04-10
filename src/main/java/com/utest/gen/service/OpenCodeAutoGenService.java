@@ -6,12 +6,10 @@ import com.utest.gen.model.*;
 import com.utest.gen.opencode.OpenCodeManager;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.*;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
+import java.io.File;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -33,7 +31,6 @@ public class OpenCodeAutoGenService {
     @Autowired
     private ResultSyncService resultSyncService;
 
-    private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
@@ -117,11 +114,9 @@ public class OpenCodeAutoGenService {
             // 查找 assistant 类型的 part 中的文本内容
             String content = null;
             for (JsonNode part : parts) {
-                JsonNode type = part.get("type");
-                if (type != null && "assistant".equals(type.asText())) {
-                    JsonNode textNode = part.get("text");
-                    if (textNode != null) {
-                        content = textNode.asText();
+                if ("assistant".equals(part.path("type").asText())) {
+                    content = part.path("text").asText(null);
+                    if (content != null && !content.isEmpty()) {
                         break;
                     }
                 }
@@ -131,6 +126,40 @@ public class OpenCodeAutoGenService {
                 return TestGenResponse.failure("Agent 返回内容为空");
             }
 
+            return parseContentResponse(content);
+
+        } catch (Exception e) {
+            log.error("解析 Agent 结果失败", e);
+            return TestGenResponse.failure("解析结果失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 从 Map 中提取内容并解析（用于兼容旧 API）
+     */
+    private TestGenResponse parseAgentResult(Map<String, Object> agentResult) {
+        try {
+            // Agent 返回的结果在 content 或 result 字段中
+            Object contentObj = agentResult.getOrDefault("content", agentResult.get("result"));
+            String content = contentObj instanceof String ? (String) contentObj : null;
+
+            if (content == null || content.isEmpty()) {
+                return TestGenResponse.failure("Agent 返回结果为空");
+            }
+
+            return parseContentResponse(content);
+
+        } catch (Exception e) {
+            log.error("解析 Agent 结果失败", e);
+            return TestGenResponse.failure("解析结果失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 解析 content 中的 JSON 响应（统一解析逻辑）
+     */
+    private TestGenResponse parseContentResponse(String content) {
+        try {
             // 从内容中提取JSON
             String jsonStr = extractJsonFromContent(content);
 
@@ -145,6 +174,9 @@ public class OpenCodeAutoGenService {
             // 解析JSON结果
             JsonNode result = objectMapper.readTree(jsonStr);
 
+            // 解析方法级别结果
+            List<MethodTestResult> methodResults = parseMethodResultsFromJsonNode(
+                    result.get("methodResults"));
 
             return TestGenResponse.builder()
                     .success(result.path("success").asBoolean(false))
@@ -161,62 +193,6 @@ public class OpenCodeAutoGenService {
                             .success(result.path("testPassed").asBoolean(false))
                             .passed(result.path("passed").asInt(0))
                             .failed(result.path("failed").asInt(0))
-                            .build())
-                    .build();
-
-        } catch (Exception e) {
-            log.error("解析 Agent 结果失败", e);
-            return TestGenResponse.failure("解析结果失败: " + e.getMessage());
-        }
-    }
-
-    /**
-     * 解析 Agent 返回的结果
-     * Agent 已完成全流程，返回最终结果
-     */
-    private TestGenResponse parseAgentResult(Map<String, Object> agentResult) {
-        try {
-            // Agent 返回的结果在 content 或 result 字段中
-            String content = (String) agentResult.getOrDefault("content",
-                    agentResult.get("result"));
-
-            if (content == null) {
-                return TestGenResponse.failure("Agent 返回结果为空");
-            }
-
-            // 从内容中提取JSON
-            String jsonStr = extractJsonFromContent(content);
-
-            if (jsonStr == null) {
-                return TestGenResponse.builder()
-                        .success(false)
-                        .errorMessage("Agent 返回格式异常: " +
-                                content.substring(0, Math.min(200, content.length())))
-                        .build();
-            }
-
-            // 解析JSON结果
-            Map<String, Object> result = objectMapper.readValue(jsonStr, Map.class);
-
-            // 解析方法级别结果（用于增量更新）
-            List<MethodTestResult> methodResults = parseMethodResults(
-                    (List<Map<String, Object>>) result.get("methodResults"));
-
-            return TestGenResponse.builder()
-                    .success((Boolean) result.getOrDefault("success", false))
-                    .testCode((String) result.get("testCode"))
-                    .testFilePath((String) result.get("testFilePath"))
-                    .testClassName((String) result.get("testClassName"))
-                    .errorMessage((String) result.get("errorMessage"))
-                    .fixRounds((Integer) result.getOrDefault("fixRounds", 0))
-                    .compileResult(CompileResult.builder()
-                            .success((Boolean) result.getOrDefault("compileSuccess", false))
-                            .errorMessage((String) result.get("compileError"))
-                            .build())
-                    .testResult(TestResult.builder()
-                            .success((Boolean) result.getOrDefault("testPassed", false))
-                            .passed((Integer) result.getOrDefault("passed", 0))
-                            .failed((Integer) result.getOrDefault("failed", 0))
                             .build())
                     .methodResults(methodResults)
                     .build();
@@ -254,53 +230,56 @@ public class OpenCodeAutoGenService {
     }
 
     /**
-     * 解析方法级别结果
+     * 解析方法级别结果（从 JsonNode）
      */
-    private List<MethodTestResult> parseMethodResults(List<Map<String, Object>> methodResults) {
-        if (methodResults == null) {
+    private List<MethodTestResult> parseMethodResultsFromJsonNode(JsonNode methodResultsNode) {
+        if (methodResultsNode == null || !methodResultsNode.isArray()) {
             return null;
         }
 
         List<MethodTestResult> results = new ArrayList<>();
-        for (Map<String, Object> mr : methodResults) {
+        for (JsonNode mr : methodResultsNode) {
             MethodTestResult methodResult = MethodTestResult.builder()
-                    .methodName((String) mr.get("methodName"))
-                    .startLine((Integer) mr.getOrDefault("startLine", 0))
-                    .endLine((Integer) mr.getOrDefault("endLine", 0))
-                    .testFunctions(parseTestFunctions(
-                            (List<Map<String, Object>>) mr.get("testFunctions")))
+                    .methodName(mr.path("methodName").asText(null))
+                    .startLine(mr.path("startLine").asInt(0))
+                    .endLine(mr.path("endLine").asInt(0))
+                    .testFunctions(parseTestFunctionsFromJsonNode(mr.path("testFunctions")))
                     .build();
             results.add(methodResult);
         }
         return results;
     }
 
+
+
     /**
-     * 解析测试函数列表
+     * 解析测试函数列表（从 JsonNode）
      */
-    private List<TestFunction> parseTestFunctions(List<Map<String, Object>> testFunctions) {
-        if (testFunctions == null) {
+    private List<TestFunction> parseTestFunctionsFromJsonNode(JsonNode testFunctionsNode) {
+        if (testFunctionsNode == null || !testFunctionsNode.isArray()) {
             return null;
         }
 
         List<TestFunction> results = new ArrayList<>();
-        for (Map<String, Object> tf : testFunctions) {
+        for (JsonNode tf : testFunctionsNode) {
             TestFunction testFunction = TestFunction.builder()
-                    .functionName((String) tf.get("functionName"))
-                    .lineNumber((Integer) tf.getOrDefault("lineNumber", 0))
-                    .scenario((String) tf.get("scenario"))
-                    .code((String) tf.get("code"))
+                    .functionName(tf.path("functionName").asText(null))
+                    .lineNumber(tf.path("lineNumber").asInt(0))
+                    .scenario(tf.path("scenario").asText(null))
+                    .code(tf.path("code").asText(null))
                     .build();
             results.add(testFunction);
         }
         return results;
     }
 
+
+
     /**
      * 从源文件路径提取类名
      */
     private String extractClassNameFromSourceFile(String sourceFile) {
-        String fileName = sourceFile.substring(sourceFile.lastIndexOf("/") + 1);
+        String fileName = sourceFile.substring(sourceFile.lastIndexOf(File.separator) + 1);
         if (fileName.endsWith(".java")) {
             fileName = fileName.substring(0, fileName.length() - 5);
         }

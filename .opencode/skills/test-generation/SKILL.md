@@ -1,7 +1,6 @@
 ---
 name: test-generation
 description: 自动化Java单元测试生成技能，集成上下文提取、代码生成、编译验证和自动修复的完整流程
-license: MIT
 compatibility: opencode
 metadata:
   category: testing
@@ -50,27 +49,6 @@ LSP提取上下文
 输出: 测试代码 + 执行结果 + 方法级行号信息
 ```
 
-## 集成方式
-
-### 方式1: 通过Agent调用
-```
-使用test-gen-agent代理执行测试生成任务
-```
-
-### 方式2: 通过API调用
-```bash
-curl -X POST http://localhost:3000/api/agent/run \
-  -H "Content-Type: application/json" \
-  -d '{
-    "agent": "test-gen-agent",
-    "prompt": "为src/main/java/com/example/UserService.java中的getUserById和saveUser方法生成单元测试"
-  }'
-```
-
-### 方式3: 通过命令调用
-```bash
-opencode run --agent test-gen-agent "生成UserService类的单元测试"
-```
 
 ## 增量更新策略
 
@@ -129,7 +107,6 @@ public class UserServiceTest {
 | 方法已有测试 | 覆盖原有测试方法 | 更新 startLine/endLine |
 | 方法无测试 | 在类中合适位置插入新测试 | 记录新的 startLine/endLine |
 | 全新测试类 | 生成完整测试类 | 记录所有方法的行号 |
-
 
 
 ## 输出规范
