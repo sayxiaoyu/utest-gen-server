@@ -44,7 +44,7 @@ public class TestGenController {
 
     /**
      * 生成单元测试（单个类）
-     * 
+     *
      * 后端只需传入：源文件路径 + 待测方法列表
      * Agent 自主完成：上下文提取 → LLM生成 → 编译 → 修复 → 运行测试
      * 后端只收集最终结果
@@ -53,7 +53,7 @@ public class TestGenController {
     public ResponseEntity<TestGenResponse> generate(@Valid @RequestBody GenerateRequest request) {
         log.info("收到生成请求: sourceFile={}, methods={}",
                 request.getSourceFile(), request.getMethodNames());
-        
+
         TestGenResponse response = openCodeAutoGenService.autoGenerate(
                 request.getSourceFile(),
                 request.getMethodNames()
@@ -63,7 +63,7 @@ public class TestGenController {
 
     /**
      * 批量生成单元测试（多个类）
-     * 
+     *
      * 支持同时传入多个类的待测方法，并行处理
      * 每个类独立调用 Agent 完成全流程
      * 默认超时：15分钟
@@ -72,9 +72,9 @@ public class TestGenController {
     public ResponseEntity<BatchGenerateResponse> generateBatch(
             @Valid @RequestBody BatchGenerateRequest request) {
         log.info("收到批量生成请求: 类数={}", request.getClasses().size());
-        
+
         long startTime = System.currentTimeMillis();
-        
+
         // 并行处理每个类的测试生成，使用自定义线程池
         List<CompletableFuture<ClassResult>> futures = request.getClasses().stream()
                 .map(classRequest -> CompletableFuture.supplyAsync(() -> {
@@ -85,7 +85,7 @@ public class TestGenController {
                                 classRequest.getMethodNames()
                         );
                         long classDuration = System.currentTimeMillis() - classStartTime;
-                        
+
                         return ClassResult.builder()
                                 .sourceFile(classRequest.getSourceFile())
                                 .methodNames(classRequest.getMethodNames())
@@ -107,7 +107,7 @@ public class TestGenController {
                     }
                 }, batchExecutor))
                 .toList();
-        
+
         // 收集所有结果，带超时控制
         List<ClassResult> results = futures.stream()
                 .map(future -> {
@@ -122,10 +122,10 @@ public class TestGenController {
                     }
                 })
                 .collect(Collectors.toList());
-        
+
         long totalDuration = System.currentTimeMillis() - startTime;
         long successCount = results.stream().filter(ClassResult::isSuccess).count();
-        
+
         BatchGenerateResponse response = BatchGenerateResponse.builder()
                 .success(successCount == results.size())
                 .total(results.size())
@@ -134,10 +134,10 @@ public class TestGenController {
                 .totalDurationMs(totalDuration)
                 .results(results)
                 .build();
-        
+
         log.info("批量生成完成: 总数={}, 成功={}, 失败={}, 耗时={}ms",
                 results.size(), successCount, results.size() - successCount, totalDuration);
-        
+
         return ResponseEntity.ok(response);
     }
 
@@ -170,7 +170,7 @@ public class TestGenController {
         try {
             String sessionJson = openCodeManager.getSession(sessionId);
             JsonNode session = objectMapper.readTree(sessionJson);
-            
+
             return ResponseEntity.ok(SessionDetailResponse.builder()
                     .id(session.path("id").asText())
                     .title(session.path("title").asText(null))
@@ -198,7 +198,7 @@ public class TestGenController {
         try {
             String sessionsJson = openCodeManager.listSessions();
             JsonNode sessions = objectMapper.readTree(sessionsJson);
-            
+
             List<SessionSummary> sessionList = new ArrayList<>();
             if (sessions.isArray()) {
                 for (JsonNode s : sessions) {
@@ -209,7 +209,7 @@ public class TestGenController {
                             .build());
                 }
             }
-            
+
             return ResponseEntity.ok(SessionListResponse.builder()
                     .total(sessionList.size())
                     .sessions(sessionList)

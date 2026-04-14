@@ -5,14 +5,15 @@ spring:
   application:
     name: utest-gen-server
   ai:
-    openai:
-      api-key: ${LLM_API_KEY:}
-      base-url: ${LLM_API_URL:http://localhost:8080/v1}
-      chat:
-        options:
-          model: ${LLM_MODEL:gpt-4}
-          max-tokens: 4096
-          temperature: 0.7
+    # MCP Server 配置（Spring AI Streamable HTTP）
+    mcp:
+      server:
+        enabled: ${DB_MCP_ENABLED:false}
+        name: db-mcp-server
+        version: 1.0.0
+        protocol: STREAMABLE
+        streamable-http:
+          mcp-endpoint: /mcp
 
 # OpenCode 配置
 opencode:
@@ -21,6 +22,7 @@ opencode:
   startup-timeout: 30
   binary-dir: opencode
   request-timeout: 120000
+  pure: false              # 是否启用纯净模式（--pure 参数，跳过更新检查）
   generation:
     timeout: 120000
     max-tokens: 4096
@@ -43,7 +45,28 @@ backend:
   api-url: ${BACKEND_API_URL:http://localhost:8080}
   api-key: ${BACKEND_API_KEY:}
   timeout: 60000
-  sync-enabled: true       # 是否启用结果同步
+  sync-enabled: false       # 是否启用结果同步
+
+# DB MCP Server 配置
+# 启用后，OpenCode 可通过 MCP 协议自主调用数据库采样工具
+# 注意：数据源由 Agent 在运行时读取被测项目配置后动态提供，无需在此配置
+db-mcp:
+  enabled: ${DB_MCP_ENABLED:false}
+  query-limit:
+    max-rows: 10           # 每表最大返回行数
+    timeout-seconds: 30    # 查询超时
+    max-columns: 50        # 最大列数
+  security:
+    allowed-operations:
+      - SELECT
+    forbidden-keywords:
+      - DELETE
+      - DROP
+      - TRUNCATE
+      - UPDATE
+      - INSERT
+      - CREATE
+      - ALTER
 
 # 提示词模板配置
 prompt:

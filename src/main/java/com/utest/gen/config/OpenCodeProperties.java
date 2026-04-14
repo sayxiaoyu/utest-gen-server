@@ -43,6 +43,11 @@ public class OpenCodeProperties {
     private int requestTimeout = 120000;
 
     /**
+     * 是否启用纯净模式（--pure 参数，跳过更新检查）
+     */
+    private boolean pure = false;
+
+    /**
      * 生成配置
      */
     private GenerationConfig generation = new GenerationConfig();
