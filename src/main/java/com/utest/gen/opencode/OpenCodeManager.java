@@ -2,6 +2,9 @@ package com.utest.gen.opencode;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.utest.gen.config.DbMcpProperties;
 import com.utest.gen.config.LlmProperties;
 import com.utest.gen.config.OpenCodeProperties;
 import jakarta.annotation.PreDestroy;
@@ -19,20 +22,12 @@ import org.apache.hc.core5.http.io.entity.StringEntity;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.http.ContentType;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.nio.file.*;
 import java.nio.file.attribute.PosixFilePermission;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -48,6 +43,15 @@ public class OpenCodeManager {
 
     @Autowired
     private LlmProperties llmProperties;
+
+    @Autowired
+    private OpenCodeEnvironmentSetup environmentSetup;
+
+    @Autowired(required = false)
+    private DbMcpProperties dbMcpProperties;
+
+    @org.springframework.beans.factory.annotation.Value("${server.port:8080}")
+    private int serverPort;
 
     private Process openCodeProcess;
     private volatile boolean running = false;
@@ -74,7 +78,13 @@ public class OpenCodeManager {
         }
 
         try {
-            // 生成 OpenCode 配置文件
+            // 1. 设置 OpenCode 运行环境（检查/提取 ripgrep）
+            boolean envReady = environmentSetup.setupEnvironment();
+            if (!envReady) {
+                log.warn("OpenCode 环境设置可能不完整，继续尝试启动...");
+            }
+
+            // 2. 生成 OpenCode 配置文件
             generateConfigFile();
 
             String serverPath = getServerPath();
@@ -86,12 +96,15 @@ public class OpenCodeManager {
             }
             log.info("OpenCode 工作目录: {}", projectRoot);
 
-            // 启动命令：直接使用 serve，不传项目路径参数
+            // 3. 启动命令：直接使用 serve，不传项目路径参数
             ProcessBuilder pb = new ProcessBuilder(
                     serverPath, "serve", "--port", String.valueOf(properties.getPort())
             );
             pb.redirectErrorStream(true);
             pb.directory(new File(projectRoot));
+
+            // 4. 设置环境变量，确保能找到 ripgrep
+            setupRipgrepPath(pb);
 
             openCodeProcess = pb.start();
 
@@ -103,6 +116,11 @@ public class OpenCodeManager {
             if (ready) {
                 running = true;
                 log.info("OpenCode Server 启动成功，端口: {}", properties.getPort());
+
+                // OpenCode 就绪后，自动执行 bootstrap 任务配置数据源
+                if (dbMcpProperties != null && dbMcpProperties.isEnabled()) {
+                    bootstrapDatasource();
+                }
             } else {
                 throw new RuntimeException("OpenCode Server 启动超时");
             }
@@ -226,11 +244,51 @@ public class OpenCodeManager {
         );
 
         // 3) 用 Jackson 保证 JSON 合法（防止以后手误改坏模板）
-        JsonNode root = OM.readTree(template);
+        ObjectNode root = (ObjectNode) OM.readTree(template);
 
-        // 4) 写文件（用 Jackson 的 pretty printer，格式干净）
+        // 4) 如果 DB Agent 已启用，注入 mcpServers 配置
+        if (dbMcpProperties != null && dbMcpProperties.isEnabled()) {
+            injectMcpServersConfig(root);
+        }
+
+        // 5) 写文件（用 Jackson 的 pretty printer，格式干净）
         Files.writeString(configPath, OM.writerWithDefaultPrettyPrinter().writeValueAsString(root));
         log.info("已生成 OpenCode 配置文件: {}", configPath);
+    }
+
+    /**
+     * 在 opencode.json 中注入 MCP 配置，供 OpenCode 连接本地 DB MCP Server。
+     * <p>
+     * 使用 remote 类型直接连接 Streamable HTTP 端点 /mcp，禁用 OAuth 自动检测。
+     * 配置格式参考：https://opencode.ai/docs/zh-cn/mcp-servers/
+     * <pre>
+     * {
+     *   "mcp": {
+     *     "db-mcp-server": {
+     *       "type": "remote",
+     *       "url": "http://127.0.0.1:8080/mcp",
+     *       "enabled": true,
+     *       "oauth": false
+     *     }
+     *   }
+     * }
+     * </pre>
+     */
+    private void injectMcpServersConfig(ObjectNode root) {
+        ObjectNode mcp = OM.createObjectNode();
+
+        ObjectNode dbMcp = OM.createObjectNode();
+        dbMcp.put("type", "remote");
+        String mcpUrl = "http://127.0.0.1:" + serverPort + "/mcp";
+        dbMcp.put("url", mcpUrl);
+        dbMcp.put("enabled", true);
+        // 禁用 OAuth 自动检测，本地服务器无需认证
+        dbMcp.put("oauth", false);
+
+        mcp.set("db-mcp-server", dbMcp);
+        root.set("mcp", mcp);
+
+        log.info("opencode.json 已注入 mcp 配置: db-mcp-server -> {} (remote/Streamable HTTP)", mcpUrl);
     }
 
 
@@ -435,7 +493,7 @@ public class OpenCodeManager {
     }
 
     /**
-     * 发送消息到指定会话并异步等待响应
+     * 发送消息到指定会话并等待响应
      *
      * @param sessionId 会话ID
      * @param message   消息内容
@@ -453,77 +511,28 @@ public class OpenCodeManager {
             client.execute(post, response -> {
                 int code = response.getCode();
                 if (code == 204) {
-                    log.debug("异步消息发送成功: sessionId={}", sessionId);
                     return null;
                 }
-                throw new RuntimeException("异步发送消息失败，状态码: " + code);
+                throw new RuntimeException("发送消息失败，状态码: " + code);
             });
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
-            throw new RuntimeException("异步发送消息失败: " + e.getMessage(), e);
+            throw new RuntimeException("发送消息失败: " + e.getMessage(), e);
         }
 
-        long timeout = 900000; // 5分钟超时
-        long interval = 10000;  // 1秒间隔
+        long timeout = 900000;
+        long interval = 1000;
         long start = System.currentTimeMillis();
-        int nullStatusCount = 0; // 连续状态为null的计数器
-
-
-
-        // 发送异步请求后等待1秒，让OpenCode Server有时间创建会话状态
-        try {
-            Thread.sleep(1000);
-
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("初始等待被中断", e);
-        }
-
         while (System.currentTimeMillis() - start < timeout) {
             try {
                 String statusJson = getSessionStatus(sessionId);
-
-
-                if (statusJson == null) {
-                    nullStatusCount++;
-
-
-                    // 状态为null，尝试直接获取消息
-                    try {
-                        String latestMessage = getLatestSessionMessage(sessionId);
-
-                        return latestMessage;
-                    } catch (Exception e) {
-                        // 如果获取消息失败，可能是会话尚未开始处理
-                        if (e.getMessage() != null && (e.getMessage().contains("404") ||
-                                                       e.getMessage().contains("不存在") ||
-                                                       e.getMessage().contains("未找到"))) {
-
-                            // 继续轮询
-                        } else {
-
-                            // 其他错误，继续轮询
-                        }
-                    }
-
-                    // 如果连续10次状态为null且无法获取消息，可能有问题
-                    if (nullStatusCount > 10) {
-                        log.warn("连续{}次获取到null状态且无法获取消息，会话可能异常", nullStatusCount);
-                    }
-                } else if (isSessionComplete(statusJson)) {
-                    log.debug("会话已完成，获取最新消息: sessionId={}", sessionId);
-                    return getLatestSessionMessage(sessionId);
-                } else {
-                    // 状态存在但未完成，重置null状态计数器
-                    nullStatusCount = 0;
-
+                if (isSessionComplete(statusJson)) {
+                    return getSessionMessages(sessionId);
                 }
             } catch (Exception e) {
-
-                nullStatusCount++;
+                log.debug("轮询会话状态失败: {}", e.getMessage());
             }
-
             try {
                 Thread.sleep(interval);
             } catch (InterruptedException e) {
@@ -531,15 +540,14 @@ public class OpenCodeManager {
                 throw new RuntimeException("轮询被中断", e);
             }
         }
-
-        throw new RuntimeException("等待会话响应超时: " + timeout + "ms");
+        throw new RuntimeException("等待会话响应超时");
     }
 
     /**
      * 获取会话状态
      *
      * @param sessionId 会话ID
-     * @return 状态 JSON 字符串，或null如果会话不存在
+     * @return 状态 JSON 字符串
      */
     private String getSessionStatus(String sessionId) {
         try (CloseableHttpClient client = HttpClients.createDefault()) {
@@ -548,46 +556,12 @@ public class OpenCodeManager {
             return client.execute(get, response -> {
                 int code = response.getCode();
                 if (code == 200) {
-                    String allStatusJson = EntityUtils.toString(response.getEntity());
-
-
-                    // 尝试解析JSON
-                    try {
-                        JsonNode root = OM.readTree(allStatusJson);
-
-                        // 检查是否是对象类型
-                        if (!root.isObject()) {
-                            log.warn("会话状态响应不是JSON对象: {}", allStatusJson);
-                            return null;
-                        }
-
-                        // 检查响应中是否包含该sessionId
-                        if (root.has(sessionId)) {
-                            JsonNode sessionStatus = root.get(sessionId);
-                            String statusStr = sessionStatus.toString();
-
-                            return statusStr;
-                        } else {
-                            // 列出所有可用的sessionId用于调试
-                            java.util.Iterator<String> fieldNames = root.fieldNames();
-                            List<String> availableSessions = new ArrayList<>();
-                            while (fieldNames.hasNext()) {
-                                availableSessions.add(fieldNames.next());
-                            }
-
-                            return null;
-                        }
-                    } catch (Exception e) {
-                        log.warn("解析会话状态JSON失败: {}, 原始响应: {}", e.getMessage(), allStatusJson);
-                        return null;
-                    }
+                    return EntityUtils.toString(response.getEntity());
                 } else {
-                    log.warn("获取会话状态失败，状态码: {}", code);
                     throw new RuntimeException("获取会话状态失败，状态码: " + code);
                 }
             });
         } catch (Exception e) {
-            log.warn("获取会话状态异常: {}", e.getMessage());
             throw new RuntimeException("获取会话状态失败: " + e.getMessage(), e);
         }
     }
@@ -595,81 +569,37 @@ public class OpenCodeManager {
     /**
      * 检查会话是否完成
      *
-     * @param statusJson 状态 JSON 字符串，或null如果会话不存在
+     * @param statusJson 状态 JSON
      * @return 是否完成
      */
     private boolean isSessionComplete(String statusJson) {
-        if (statusJson == null) {
-            // 状态为null，不由这个方法处理，由调用者处理
-
-            return false;
-        }
         try {
-            JsonNode status = OM.readTree(statusJson);
-
-
-            // 检查各种可能的完成状态字段
-            if (status.has("idle")) {
-                boolean idle = status.get("idle").asBoolean(false);
-
-                return idle;
+            JsonNode root = OM.readTree(statusJson);
+            JsonNode sessionStatus = root.get("status");
+            if (sessionStatus != null && sessionStatus.has("idle")) {
+                return sessionStatus.get("idle").asBoolean(false);
             }
-
-            // 如果没有idle字段，检查其他可能的状态字段
-            if (status.has("status")) {
-                String statusStr = status.get("status").asText();
-                boolean complete = "idle".equals(statusStr) || "complete".equals(statusStr) || "done".equals(statusStr);
-
-                return complete;
-            }
-
-
             return false;
         } catch (Exception e) {
-
+            log.debug("解析会话状态失败: {}", e.getMessage());
             return false;
         }
     }
 
     /**
-     * 获取会话的最新消息（通常是刚完成的assistant响应）
+     * 获取会话的所有消息
      *
      * @param sessionId 会话ID
-     * @return 最新消息 JSON 字符串
+     * @return 消息 JSON 字符串
      */
-    private String getLatestSessionMessage(String sessionId) {
+    private String getSessionMessages(String sessionId) {
         try (CloseableHttpClient client = HttpClients.createDefault()) {
             String url = getServerUrl() + "/session/" + sessionId + "/message";
             HttpGet get = new HttpGet(url);
             return client.execute(get, response -> {
                 int code = response.getCode();
                 if (code == 200) {
-                    String messagesJson = EntityUtils.toString(response.getEntity());
-
-
-                    // 解析消息数组，找到最新的assistant消息
-                    JsonNode messages = OM.readTree(messagesJson);
-                    if (messages.isArray() && messages.size() > 0) {
-                        // 从后往前查找最新的assistant消息
-                        for (int i = messages.size() - 1; i >= 0; i--) {
-                            JsonNode msg = messages.get(i);
-                            JsonNode info = msg.get("info");
-                            if (info != null && info.has("role")) {
-                                String role = info.get("role").asText();
-                                if ("assistant".equals(role)) {
-                                    String latestMsg = msg.toString();
-
-                                    return latestMsg;
-                                }
-                            }
-                        }
-                        // 如果没有找到assistant消息，返回最后一条消息
-                        String lastMsg = messages.get(messages.size() - 1).toString();
-
-                        return lastMsg;
-                    } else {
-                        throw new RuntimeException("会话消息为空或格式错误");
-                    }
+                    return EntityUtils.toString(response.getEntity());
                 } else {
                     throw new RuntimeException("获取会话消息失败，状态码: " + code);
                 }
@@ -691,11 +621,7 @@ public class OpenCodeManager {
             body.append("\"agent\":\"").append(agent).append("\"");
             body.append(",");
         }
-        body.append("\"model\":{\"modelID\":\"")
-                .append(llmProperties.getModel())
-                .append("\",\"providerID\":\"")
-                .append(llmProperties.getProviderId())
-                .append("\"}");
+        body.append("\"model\":{\"modelID\":\"").append(llmProperties.getModel()).append("\",\"providerID\":\"deepseek\"}");
         body.append(",\"parts\":[{\"type\":\"text\",\"text\":\"").append(escapeJson(message)).append("\"}]}");
 
         return body.toString();
@@ -863,6 +789,137 @@ public class OpenCodeManager {
             }
         }
         return false;
+    }
+
+    /**
+     * 设置 ripgrep 路径到环境变量
+     */
+    private void setupRipgrepPath(ProcessBuilder pb) {
+        try {
+            // 检查系统是否已有 ripgrep
+            if (isRipgrepInPath()) {
+                log.info("系统 PATH 中已存在 ripgrep");
+                return;
+            }
+
+            // 根据平台确定资源路径
+            String resourcePath = getRipgrepResourcePath();
+            String binaryName = resourcePath.substring(resourcePath.lastIndexOf('/') + 1);
+
+            // 从内嵌资源中提取 ripgrep
+            Path tempDir = Files.createTempDirectory("utest-gen-rg");
+            Path rgPath = tempDir.resolve(binaryName);
+
+            try (InputStream is = getClass().getClassLoader().getResourceAsStream(resourcePath)) {
+                if (is == null) {
+                    log.warn("内嵌资源中未找到 ripgrep: {}", resourcePath);
+                    return;
+                }
+                Files.copy(is, rgPath, StandardCopyOption.REPLACE_EXISTING);
+
+                // 设置可执行权限（非 Windows）
+                if (!System.getProperty("os.name").toLowerCase().contains("win")) {
+                    rgPath.toFile().setExecutable(true);
+                }
+                log.info("已提取 ripgrep 到: {}", rgPath);
+            }
+
+            // 更新 PATH 环境变量
+            Map<String, String> env = pb.environment();
+            String currentPath = env.getOrDefault("PATH", System.getenv("PATH"));
+            String newPath = tempDir.toString() + File.pathSeparator + currentPath;
+            env.put("PATH", newPath);
+            log.info("已将 ripgrep 路径添加到 PATH: {}", tempDir);
+
+        } catch (Exception e) {
+            log.warn("设置 ripgrep 路径失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 根据平台获取 ripgrep 资源路径
+     */
+    private String getRipgrepResourcePath() {
+        String os = System.getProperty("os.name").toLowerCase();
+        String arch = System.getProperty("os.arch").toLowerCase();
+
+        String platform;
+        if (os.contains("mac") || os.contains("darwin")) {
+            platform = arch.contains("aarch64") || arch.contains("arm64")
+                    ? "darwin-arm64" : "darwin-x64";
+        } else if (os.contains("linux")) {
+            platform = arch.contains("aarch64") || arch.contains("arm64")
+                    ? "linux-arm64" : "linux-x64";
+        } else if (os.contains("win")) {
+            platform = "win32-x64";
+        } else {
+            throw new UnsupportedOperationException("不支持的操作系统: " + os);
+        }
+
+        String binaryName = os.contains("win") ? "rg.exe" : "rg";
+        return "opencode/bin/ripgrep" + platform + "/" + binaryName;
+    }
+
+    /**
+     * 检查 ripgrep 是否在 PATH 中
+     */
+    private boolean isRipgrepInPath() {
+        try {
+            Process process = new ProcessBuilder("rg", "--version")
+                    .redirectErrorStream(true)
+                    .start();
+            boolean finished = process.waitFor(5, TimeUnit.SECONDS);
+            return finished && process.exitValue() == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Bootstrap 任务：OpenCode 启动后自动读取被测项目配置并配置数据源。
+     * <p>
+     * 流程：创建临时会话 → 发送 bootstrap 消息 → OpenCode 读取配置文件并调用 configure_datasource MCP 工具。
+     * 一次性操作，后续任务通过 health_check 确认数据源已就绪。
+     */
+    private void bootstrapDatasource() {
+        log.info("[Bootstrap] 开始自动配置数据源...");
+        try {
+            String sessionId = createSession(null, "bootstrap-datasource");
+
+            String bootstrapMessage = """
+                    你需要尝试完成一个初始化任务：配置数据库连接。
+                    
+                    步骤：
+                    1. 读取当前项目的数据源配置文件，依次查找：
+                       - src/main/resources/application.yml
+                       - src/main/resources/application.properties
+                       - src/main/resources/application-*.yml
+                       - src/main/resources/bootstrap.yml
+                    2. 在配置中查找 spring.datasource 的 url、username、password 信息
+                       - 如遇 ${VAR:default} 占位符，使用冒号后的默认值
+                    3. **如果找到了数据源配置**：调用 MCP 工具 configure_datasource 初始化连接
+                    4. **如果没有找到数据源配置**（项目不使用数据库）：直接结束，回复"当前项目无数据源配置，跳过初始化"
+                    
+                    注意：并非所有项目都有数据库，找不到配置是正常情况，不要报错。
+                    这是一个简单的初始化任务，不需要生成任何代码。完成后简要说明结果即可。
+                    """;
+
+            // 异步执行 bootstrap，不阻塞主启动流程
+            Thread bootstrapThread = new Thread(() -> {
+                try {
+                    String result = sendMessage(sessionId, bootstrapMessage, null);
+                    log.info("[Bootstrap] 数据源配置完成");
+                    log.debug("[Bootstrap] 响应: {}", result);
+                } catch (Exception e) {
+                    log.warn("[Bootstrap] 数据源自动配置失败，Agent 可在任务中通过 health_check 检测并手动配置: {}", e.getMessage());
+                }
+            }, "opencode-bootstrap-datasource");
+            bootstrapThread.setDaemon(true);
+            bootstrapThread.start();
+
+        } catch (Exception e) {
+            log.warn("[Bootstrap] 创建 bootstrap 会话失败: {}", e.getMessage());
+        }
     }
 
     /**

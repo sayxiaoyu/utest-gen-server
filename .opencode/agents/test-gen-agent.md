@@ -2,10 +2,10 @@
 name: test-gen-agent
 description: AI单元测试生成专用代理，通过加载Skill指导来完成上下文提取、测试代码生成、编译验证和自动修复的完整流程
 tools:
-  skill: true
-  bash: true
-  write: true
-  read: true
+   skill: true
+   bash: true
+   write: true
+   read: true
 ---
 
 # AI单元测试生成代理
@@ -27,6 +27,7 @@ tools:
 |------|----------|------|
 | **主控** | test-generation | **核心Skill**，指导完整测试生成流程（含增量更新策略） |
 | 辅助 | context-extraction | 指导如何使用LSP提取Java类上下文 |
+| 辅助 | **db-sampling** | **判断是否涉及DB操作，通过MCP工具采样真实数据** |
 | 辅助 | code-generation | 指导如何生成JUnit 5 + Mockito测试代码 |
 | 辅助 | compile-verify | 指导如何编译验证测试代码 |
 | 辅助 | auto-fix | 指导如何根据错误修复代码 |
@@ -57,12 +58,33 @@ tools:
    - 分析调用关系和依赖
 3. **整理输出**：将提取的信息整理为JSON格式
 
+### 步骤2.5: 数据库真实数据采样（自主判断）
+1. **加载Skill**: `skill(name="db-sampling")`
+2. **分析被测方法**：根据上下文判断是否涉及数据库操作：
+   - 检查是否调用了 Mapper/Dao/Repository
+   - 检查方法参数和返回值是否包含 Entity 对象
+   - 检查是否有 @Select/@Insert 等 SQL 注解
+3. **如果需要采样**（通过 MCP 工具）：
+   - **先调用 `health_check`** 检查数据源状态
+   - **如果返回 `healthy`**：数据源已在 bootstrap 时自动配置，直接采样
+   - **如果返回 `not_configured`**：读取被测项目的 `application.yml` 中的 `spring.datasource`，调用 `configure_datasource` 初始化
+   - 识别涉及的数据库表名（Entity 类名驼峰转下划线）
+   - 调用 `tables_list` 确认表是否存在
+   - 调用 `data_query_batch` 或 `data_query` 采样真实数据
+   - 将采样数据用于后续测试代码生成（构造 Mock 返回值和断言条件）
+4. **如果无需采样**：跳过此步骤，使用模拟数据生成测试
+5. **MCP 不可用或数据源配置失败时**：静默跳过，不报错，回退到模拟数据模式
+
 ### 步骤3: 增量生成测试代码
 1. **加载Skill**: `skill(name="code-generation")`
 2. **结合增量策略**（来自 `test-generation` Skill）：
    - **新方法**：在合适位置插入生成的测试
    - **已有方法**：根据记录的行号覆盖原有测试
-3. **输出**：完整的Java测试类代码（含新增和修改的部分）
+3. **利用采样数据**（如果步骤2.5有采样结果）：
+   - 用真实数据构造 Mock 返回值（如 `when(dao.findById(1L)).thenReturn(realEntity)`）
+   - 用真实字段值作为断言条件（如 `assertEquals("XXX产品", result.getName())`）
+   - 确保测试数据覆盖正常、边界、异常场景
+4. **输出**：完整的Java测试类代码（含新增和修改的部分）
 
 ### 步骤4: 编译验证
 1. **加载Skill**: `skill(name="compile-verify")`
@@ -119,9 +141,17 @@ tools:
    → 提取UserService上下文
    → 输出: {classContext: {...}, methodContexts: [...]}
 
+1.5. skill(name="db-sampling")
+   → 分析: getUserById 调用了 userRepository.findById → 需要采样
+   → 调用 health_check → 返回 healthy（bootstrap 已自动配置数据源）
+   → 识别表名: User → user / t_user
+   → 调用 tables_list 确认表名
+   → 调用 data_query(table="user", limit=5)
+   → 获得真实用户数据样本
+
 2. skill(name="code-generation")
-   → 生成完整UserServiceTest类（含getUserById和saveUser的测试）
-   → 输出: "生成的测试代码"
+   → 结合真实数据样本生成UserServiceTest类
+   → Mock返回值使用真实字段值
 
 3. skill(name="compile-verify")
    → write代码到新文件，bash执行编译
@@ -213,4 +243,6 @@ tools:
 4. 修复次数不超过2次
 5. 只输出可直接编译运行的Java代码
 6. 包含所有必要的import语句
-7. 禁止修改其他文件中的内容，只对生成的测试文件做调整
+7. **DB采样是可选步骤**：MCP工具不可用或数据源配置失败时静默跳过，不影响主流程
+8. 当采样到真实数据时，优先使用真实数据构造Mock和断言
+9. **数据源通常已自动配置**：启动时 bootstrap 任务已自动完成，采样前先用 health_check 确认

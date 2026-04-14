@@ -33,7 +33,7 @@ public class LlmProperties {
     /**
      * 最大 Token 数
      */
-    private int maxTokens = 4096;
+    private int maxTokens = 8192;
 
     /** limit.context（可选，建议配置） */
     private Integer context = 200000;
